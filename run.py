@@ -59,8 +59,9 @@ def get_dynamic_clip_info(
     "start_time", "duration", "short_title", "short_description"
     """
     try:
+        # Updated model string to gemini-3.6-flash (Free Tier)
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=prompt,
         )
         text_response = response.text.strip()
@@ -92,11 +93,14 @@ def download_and_cut_video(
         f"Fetching stream for {video_url} starting at {start_time} for {duration}s..."
     )
 
+    # Bypasses YouTube bot verification on cloud runners
     cmd = [
         "yt-dlp",
+        "--extractor-args",
+        "youtube:player_client=android,web",
         "-g",
         "-f",
-        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "b[ext=mp4]/best[ext=mp4]/best",
         video_url,
     ]
     try:
