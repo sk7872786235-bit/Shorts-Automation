@@ -1,12 +1,12 @@
 """
-Automated YouTube Shorts Pipeline (run.py)
+Automated YouTube Shorts Pipeline (Dynamic Clip Timing via Gemini)
 """
 
 import json
 import os
 import subprocess
 import sys
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import feedparser
 from google import genai
@@ -14,64 +14,49 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from youtube_transcript_api import YouTubeTranscriptApi
 
-# Setup Gemini Client
+# Initialize Gemini Client
 gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 
 # -------------------------------------------------------------------
-# 1. Fetch Latest Video ID from RSS Feed
+# 1. Fetch Latest Video Details from RSS Feed
 # -------------------------------------------------------------------
-def get_latest_video_id(channel_id: str) -> Optional[str]:
+def get_latest_video_info(channel_id: str) -> Optional[Dict[str, str]]:
     rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     feed = feedparser.parse(rss_url)
     if not feed.entries:
         print("No videos found in feed.")
         return None
+
     latest_entry = feed.entries[0]
-    return latest_entry.yt_videoid
+    return {
+        "video_id": latest_entry.yt_videoid,
+        "title": latest_entry.title,
+        "description": latest_entry.get("summary", ""),
+    }
 
 
 # -------------------------------------------------------------------
-# 2. Get Video Transcript (Robust Multi-Version Compatibility)
+# 2. Use Gemini to Determine Clip Timestamps & Short Metadata
 # -------------------------------------------------------------------
-def get_video_transcript(video_id: str) -> Optional[str]:
-    try:
-        # Try new instance approach
-        api = YouTubeTranscriptApi()
-        if hasattr(api, "get_transcript"):
-            transcript_list = api.get_transcript(video_id)
-        elif hasattr(YouTubeTranscriptApi, "get_transcript"):
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-        else:
-            # Fallback for newer v0.6+ API methods
-            fetched = YouTubeTranscriptApi.get_transcripts([video_id])
-            transcript_list = fetched[0][video_id]
-
-        full_text = " ".join([entry["text"] for entry in transcript_list])
-        return full_text
-    except Exception as e:
-        print(f"Error retrieving transcript: {e}")
-        return None
-
-
-# -------------------------------------------------------------------
-# 3. Detect Top Clips using Gemini API
-# -------------------------------------------------------------------
-def get_viral_clips(transcript: str) -> List[Dict[str, str]]:
+def get_dynamic_clip_info(
+    title: str, description: str
+) -> Optional[Dict[str, str]]:
     prompt = f"""
-    You are an expert video editor. Analyze the transcript below and identify up to 5 viral, high-hook clips suitable for YouTube Shorts.
-    For each clip, provide:
-    1. start_time (in HH:MM:SS format)
-    2. end_time (in HH:MM:SS format)
-    3. title (Catchy title for the Short)
-    4. description (Short description with hashtags)
-
-    Return ONLY a valid JSON array of objects with keys: "start_time", "end_time", "title", "description".
-
-    Transcript:
-    {transcript}
+    You are an expert YouTube Shorts editor for a Kids Animation & Songs channel.
+    
+    Video Title: "{title}"
+    Video Description: "{description}"
+    
+    Tasks:
+    1. Determine the best starting timestamp (in HH:MM:SS format) for a 30 to 45 second Short clip. Skip intro title cards (usually start around 00:00:15 or 00:00:20).
+    2. Suggest a clip duration (in seconds, between 30 and 45).
+    3. Create a high-hook YouTube Short title with emojis and relevant hashtags (e.g. #Shorts #KidsSongs #Animation).
+    4. Write a brief engaging description for parents and toddlers.
+    
+    Return ONLY a valid JSON object with these exact keys:
+    "start_time", "duration", "short_title", "short_description"
     """
     try:
         response = gemini_client.models.generate_content(
@@ -87,14 +72,26 @@ def get_viral_clips(transcript: str) -> List[Dict[str, str]]:
         return json.loads(text_response.strip())
     except Exception as e:
         print(f"Error calling Gemini API: {e}")
-        return []
+        # Fallback values if Gemini API encounters an issue
+        return {
+            "start_time": "00:00:20",
+            "duration": "40",
+            "short_title": f"{title} #Shorts #KidsSongs",
+            "short_description": "Check out our latest animated kids song! Subscribe for more.",
+        }
 
 
 # -------------------------------------------------------------------
-# 4. Download and Cut Video using FFmpeg
+# 3. Download, Cut & Crop Video to Vertical 9:16 Shorts Format
 # -------------------------------------------------------------------
-def download_and_cut_video(video_id: str, start_time: str, end_time: str, output_file: str) -> bool:
+def download_and_cut_video(
+    video_id: str, start_time: str, duration: str, output_file: str
+) -> bool:
     video_url = f"https://www.youtube.com/watch?v={video_id}"
+    print(
+        f"Fetching stream for {video_url} starting at {start_time} for {duration}s..."
+    )
+
     cmd = [
         "yt-dlp",
         "-g",
@@ -103,29 +100,39 @@ def download_and_cut_video(video_id: str, start_time: str, end_time: str, output
         video_url,
     ]
     try:
-        stream_url = subprocess.check_output(cmd).decode("utf-8").strip().split("\n")[0]
+        stream_output = (
+            subprocess.check_output(cmd).decode("utf-8").strip().split("\n")
+        )
+        stream_url = stream_output[0]
+
+        # Crop horizontal video into vertical 9:16 aspect ratio for YouTube Shorts
         ffmpeg_cmd = [
             "ffmpeg",
             "-y",
             "-ss",
             start_time,
-            "-to",
-            end_time,
             "-i",
             stream_url,
-            "-c",
-            "copy",
+            "-t",
+            duration,
+            "-vf",
+            "crop=ih*(9/16):ih",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
             output_file,
         ]
+        print("Processing clip with FFmpeg...")
         subprocess.run(ffmpeg_cmd, check=True)
         return True
     except Exception as e:
-        print(f"Error downloading/processing video clip: {e}")
+        print(f"Error processing video clip: {e}")
         return False
 
 
 # -------------------------------------------------------------------
-# 5. Upload Video to YouTube via OAuth2 Credentials
+# 4. Upload Video to YouTube via OAuth2
 # -------------------------------------------------------------------
 def get_youtube_service():
     client_id = os.environ.get("YT_CLIENT_ID")
@@ -150,17 +157,19 @@ def upload_short(video_path: str, title: str, description: str):
             "snippet": {
                 "title": title,
                 "description": description,
-                "categoryId": "22",
+                "categoryId": "1",  # Film & Animation
             },
             "status": {
                 "privacyStatus": "public",
-                "selfDeclaredMadeForKids": False,
+                "selfDeclaredMadeForKids": True,
             },
         }
         media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
-        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+        request = youtube.videos().insert(
+            part="snippet,status", body=body, media_body=media
+        )
         response = request.execute()
-        print(f"Successfully uploaded video ID: {response.get('id')}")
+        print(f"Successfully uploaded Short! Video ID: {response.get('id')}")
     except Exception as e:
         print(f"Error uploading video: {e}")
 
@@ -175,30 +184,34 @@ def main():
         sys.exit(1)
 
     print(f"Fetching latest video for channel: {channel_id}")
-    video_id = get_latest_video_id(channel_id)
-    if not video_id:
-        print("Could not retrieve latest video ID.")
+    video_info = get_latest_video_info(channel_id)
+    if not video_info:
+        print("Could not retrieve latest video details.")
         return
 
-    print(f"Processing latest video ID: {video_id}")
-    transcript = get_video_transcript(video_id)
-    if not transcript:
-        print("Skipping video due to missing transcript.")
-        return
+    video_id = video_info["video_id"]
+    print(
+        f"Processing video: '{video_info['title']}' (Video ID: {video_id})"
+    )
 
-    print("Analyzing transcript with Gemini for viral clips...")
-    clips = get_viral_clips(transcript)
-    if not clips:
-        print("No clips generated by Gemini.")
-        return
+    print("Asking Gemini for dynamic clip timing & Short metadata...")
+    clip_info = get_dynamic_clip_info(
+        video_info["title"], video_info["description"]
+    )
 
-    clip = clips[0]
     output_filename = "short_output.mp4"
-    print(f"Generating clip '{clip.get('title')}' from {clip.get('start_time')} to {clip.get('end_time')}...")
-
-    if download_and_cut_video(video_id, clip["start_time"], clip["end_time"], output_filename):
-        print("Uploading short to YouTube...")
-        upload_short(output_filename, clip["title"], clip["description"])
+    if download_and_cut_video(
+        video_id,
+        start_time=clip_info["start_time"],
+        duration=str(clip_info["duration"]),
+        output_file=output_filename,
+    ):
+        print("Uploading Short to YouTube...")
+        upload_short(
+            output_filename,
+            title=clip_info["short_title"],
+            description=clip_info["short_description"],
+        )
 
 
 if __name__ == "__main__":
