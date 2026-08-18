@@ -36,13 +36,13 @@ def get_latest_video_id(channel_id: str) -> Optional[str]:
 
 
 # -------------------------------------------------------------------
-# 2. Get Video Transcript (Fixed for latest API version)
+# 2. Get Video Transcript (Fixed for YouTubeTranscriptApi class method)
 # -------------------------------------------------------------------
 def get_video_transcript(video_id: str) -> Optional[str]:
     try:
-        api = YouTubeTranscriptApi()
-        transcript = api.get_transcript(video_id)
-        full_text = " ".join([entry["text"] for entry in transcript])
+        # Static class call to get_transcript
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        full_text = " ".join([entry["text"] for entry in transcript_list])
         return full_text
     except Exception as e:
         print(f"Error retrieving transcript: {e}")
