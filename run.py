@@ -1,5 +1,5 @@
 """
-Automated YouTube Shorts Pipeline (Dynamic Clip Timing via Gemini)
+Automated YouTube Shorts Pipeline (Dynamic Clip Timing + Cookie Authentication)
 """
 
 import json
@@ -17,6 +17,21 @@ from googleapiclient.http import MediaFileUpload
 
 # Initialize Gemini Client
 gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+
+# -------------------------------------------------------------------
+# Helper: Setup Cookies from GitHub Secret
+# -------------------------------------------------------------------
+def setup_cookies() -> Optional[str]:
+    cookies_content = os.environ.get("YT_COOKIES")
+    if not cookies_content:
+        print("Warning: YT_COOKIES environment variable not found.")
+        return None
+
+    cookie_file = "cookies.txt"
+    with open(cookie_file, "w", encoding="utf-8") as f:
+        f.write(cookies_content)
+    return cookie_file
 
 
 # -------------------------------------------------------------------
@@ -59,7 +74,6 @@ def get_dynamic_clip_info(
     "start_time", "duration", "short_title", "short_description"
     """
     try:
-        # Updated model string to gemini-3.6-flash (Free Tier)
         response = gemini_client.models.generate_content(
             model="gemini-3.6-flash",
             contents=prompt,
@@ -73,7 +87,6 @@ def get_dynamic_clip_info(
         return json.loads(text_response.strip())
     except Exception as e:
         print(f"Error calling Gemini API: {e}")
-        # Fallback values if Gemini API encounters an issue
         return {
             "start_time": "00:00:20",
             "duration": "40",
@@ -86,30 +99,36 @@ def get_dynamic_clip_info(
 # 3. Download, Cut & Crop Video to Vertical 9:16 Shorts Format
 # -------------------------------------------------------------------
 def download_and_cut_video(
-    video_id: str, start_time: str, duration: str, output_file: str
+    video_id: str,
+    start_time: str,
+    duration: str,
+    output_file: str,
+    cookie_file: Optional[str] = None,
 ) -> bool:
     video_url = f"https://www.youtube.com/watch?v={video_id}"
     print(
         f"Fetching stream for {video_url} starting at {start_time} for {duration}s..."
     )
 
-    # Bypasses YouTube bot verification on cloud runners
     cmd = [
         "yt-dlp",
         "--extractor-args",
         "youtube:player_client=android,web",
-        "-g",
-        "-f",
-        "b[ext=mp4]/best[ext=mp4]/best",
-        video_url,
     ]
+
+    if cookie_file and os.path.exists(cookie_file):
+        cmd.extend(["--cookies", cookie_file])
+
+    cmd.extend(
+        ["-g", "-f", "b[ext=mp4]/best[ext=mp4]/best", video_url]
+    )
+
     try:
         stream_output = (
             subprocess.check_output(cmd).decode("utf-8").strip().split("\n")
         )
         stream_url = stream_output[0]
 
-        # Crop horizontal video into vertical 9:16 aspect ratio for YouTube Shorts
         ffmpeg_cmd = [
             "ffmpeg",
             "-y",
@@ -161,7 +180,7 @@ def upload_short(video_path: str, title: str, description: str):
             "snippet": {
                 "title": title,
                 "description": description,
-                "categoryId": "1",  # Film & Animation
+                "categoryId": "1",
             },
             "status": {
                 "privacyStatus": "public",
@@ -187,6 +206,9 @@ def main():
         print("YT_CHANNEL_ID environment variable is missing.")
         sys.exit(1)
 
+    # Setup cookies file if available
+    cookie_file = setup_cookies()
+
     print(f"Fetching latest video for channel: {channel_id}")
     video_info = get_latest_video_info(channel_id)
     if not video_info:
@@ -209,6 +231,7 @@ def main():
         start_time=clip_info["start_time"],
         duration=str(clip_info["duration"]),
         output_file=output_filename,
+        cookie_file=cookie_file,
     ):
         print("Uploading Short to YouTube...")
         upload_short(
