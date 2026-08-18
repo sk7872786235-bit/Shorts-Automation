@@ -75,7 +75,7 @@ def get_dynamic_clip_info(
     """
     try:
         response = gemini_client.models.generate_content(
-            model="gemini-3.6-flash",
+            model="gemini-2.5-flash",
             contents=prompt,
         )
         text_response = response.text.strip()
