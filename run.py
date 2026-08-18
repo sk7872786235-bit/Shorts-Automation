@@ -40,7 +40,7 @@ def setup_cookies() -> Optional[str]:
 # 1. Fetch Latest Video Details from RSS Feed
 # -------------------------------------------------------------------
 def get_latest_video_info(channel_id: str) -> Optional[Dict[str, str]]:
-    rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    rss_url = f"[https://www.youtube.com/feeds/videos.xml?channel_id=](https://www.youtube.com/feeds/videos.xml?channel_id=){channel_id}"
     feed = feedparser.parse(rss_url)
     if not feed.entries:
         print("No videos found in feed.")
@@ -76,8 +76,7 @@ def get_dynamic_clip_info(
     "start_time", "duration", "short_title", "short_description"
     """
     try:
-        # Fixed: Updated to gemini-3.6-flash as per the API 404 error log
-        # Fixed: Using Chat session to avoid the Automatic Function Calling (AFC) warning
+        # Using Chat session to avoid the Automatic Function Calling (AFC) warning
         chat = gemini_client.chats.create(model="gemini-3.6-flash")
         response = chat.send_message(prompt)
         
@@ -86,4 +85,172 @@ def get_dynamic_clip_info(
         # Clean up Markdown JSON formatting if present
         if text_response.startswith("```json"):
             text_response = text_response[7:]
-        if text_response.endswith("
+        # ---- THIS IS THE LINE THAT WAS BROKEN IN YOUR REPO ----
+        if text_response.endswith("```"):
+            text_response = text_response[:-3]
+
+        return json.loads(text_response.strip())
+    except Exception as e:
+        print(f"Error calling Gemini API: {e}")
+        return {
+            "start_time": "00:00:20",
+            "duration": "40",
+            "short_title": f"{title} #Shorts #KidsSongs",
+            "short_description": "Check out our latest animated kids song! Subscribe for more.",
+        }
+
+
+# -------------------------------------------------------------------
+# 3. Download, Cut & Crop Video to Vertical 9:16 Shorts Format
+# -------------------------------------------------------------------
+def download_and_cut_video(
+    video_id: str,
+    start_time: str,
+    duration: str,
+    output_file: str,
+    cookie_file: Optional[str] = None,
+) -> bool:
+    video_url = f"[https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=){video_id}"
+    print(
+        f"Fetching stream for {video_url} starting at {start_time} for {duration}s..."
+    )
+
+    cmd = [
+        "yt-dlp",
+        "--extractor-args",
+        "youtube:player_client=android,web",
+    ]
+
+    # Apply cookies if the file was successfully created from secrets
+    if cookie_file and os.path.exists(cookie_file):
+        cmd.extend(["--cookies", cookie_file])
+
+    cmd.extend(
+        ["-g", "-f", "b[ext=mp4]/best[ext=mp4]/best", video_url]
+    )
+
+    try:
+        stream_output = (
+            subprocess.check_output(cmd).decode("utf-8").strip().split("\n")
+        )
+        stream_url = stream_output[0]
+
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            start_time,
+            "-i",
+            stream_url,
+            "-t",
+            duration,
+            "-vf",
+            "crop=ih*(9/16):ih",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            output_file,
+        ]
+        print("Processing clip with FFmpeg...")
+        subprocess.run(ffmpeg_cmd, check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Subprocess error (yt-dlp or ffmpeg failed): {e}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error processing video clip: {e}")
+        return False
+
+
+# -------------------------------------------------------------------
+# 4. Upload Video to YouTube via OAuth2
+# -------------------------------------------------------------------
+def get_youtube_service():
+    client_id = os.environ.get("YT_CLIENT_ID")
+    client_secret = os.environ.get("YT_CLIENT_SECRET")
+    refresh_token = os.environ.get("YT_REFRESH_TOKEN")
+
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri="[https://oauth2.googleapis.com/token](https://oauth2.googleapis.com/token)",
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    creds.refresh(Request())
+    return build("youtube", "v3", credentials=creds)
+
+
+def upload_short(video_path: str, title: str, description: str):
+    try:
+        youtube = get_youtube_service()
+        body = {
+            "snippet": {
+                "title": title,
+                "description": description,
+                "categoryId": "1",
+            },
+            "status": {
+                "privacyStatus": "public",
+                "selfDeclaredMadeForKids": True,
+            },
+        }
+        media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
+        request = youtube.videos().insert(
+            part="snippet,status", body=body, media_body=media
+        )
+        response = request.execute()
+        print(f"Successfully uploaded Short! Video ID: {response.get('id')}")
+    except Exception as e:
+        print(f"Error uploading video: {e}")
+
+
+# -------------------------------------------------------------------
+# Main Pipeline Execution
+# -------------------------------------------------------------------
+def main():
+    channel_id = os.environ.get("YT_CHANNEL_ID")
+    if not channel_id:
+        print("YT_CHANNEL_ID environment variable is missing.")
+        sys.exit(1)
+
+    # Setup cookies file if available
+    cookie_file = setup_cookies()
+
+    print(f"Fetching latest video for channel: {channel_id}")
+    video_info = get_latest_video_info(channel_id)
+    if not video_info:
+        print("Could not retrieve latest video details.")
+        return
+
+    video_id = video_info["video_id"]
+    print(
+        f"Processing video: '{video_info['title']}' (Video ID: {video_id})"
+    )
+
+    print("Asking Gemini for dynamic clip timing & Short metadata...")
+    clip_info = get_dynamic_clip_info(
+        video_info["title"], video_info["description"]
+    )
+
+    output_filename = "short_output.mp4"
+    if download_and_cut_video(
+        video_id,
+        start_time=clip_info["start_time"],
+        duration=str(clip_info["duration"]),
+        output_file=output_filename,
+        cookie_file=cookie_file,
+    ):
+        print("Uploading Short to YouTube...")
+        upload_short(
+            output_filename,
+            title=clip_info["short_title"],
+            description=clip_info["short_description"],
+        )
+    else:
+        print("Pipeline halted: Failed to download and cut video.")
+
+
+if __name__ == "__main__":
+    main()
