@@ -1,5 +1,5 @@
 import os, sys, json, feedparser, subprocess, requests, time
-import google.generativeai as genai
+from google import genai
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
@@ -77,20 +77,16 @@ def main():
     print("\n--- FETCHING AUDIO ---", flush=True)
     download_via_invidious(video_id, "audio.m4a", is_audio=True)
 
-    # 2. Upload Audio to Gemini 1.5 Flash
+    # 2. Upload Audio to Gemini 2.5 Flash
     print("\n--- AI ANALYSIS ---", flush=True)
     print("Uploading audio to Gemini...", flush=True)
     
-    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-    audio_file = genai.upload_file("audio.m4a")
+    # .strip() removes any accidental hidden spaces or newlines in the GitHub Secret
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"].strip())
+    audio_file = client.files.upload(file="audio.m4a")
     
-    # Wait for Google's servers to process the audio file
-    print("Waiting for Gemini to process the audio track...", flush=True)
-    while audio_file.state.name == "PROCESSING":
-        print(".", end="", flush=True)
-        time.sleep(2)
-        audio_file = genai.get_file(audio_file.name)
-    print("\nAudio ready!", flush=True)
+    print("Waiting for Google's servers to process the audio track...", flush=True)
+    time.sleep(15) 
     
     prompt = """
     Listen to this audio track from a kids' YouTube video. 
@@ -100,8 +96,12 @@ def main():
     """
     
     print("Analyzing audio to find the best viral hook...", flush=True)
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    response = model.generate_content([audio_file, prompt])
+    
+    # We must use gemini-2.5-flash here to avoid the 404 error
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[audio_file, prompt]
+    )
     
     clean_json = response.text.strip().replace("```json", "").replace("```", "")
     timestamps = json.loads(clean_json)
@@ -155,7 +155,7 @@ def main():
         f.write(f"{video_id}\n")
 
     try:
-        genai.delete_file(audio_file.name)
+        client.files.delete(name=audio_file.name)
     except:
         pass
 
