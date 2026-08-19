@@ -3,11 +3,12 @@
 YouTube Shorts Automation Engine (run.py)
 =========================================
 Features:
-1. Universal Cookie Sanitizer (JSON arrays, raw strings, and Netscape support).
-2. Real Browser TLS Impersonation via curl_cffi & tv_embedded client rotation.
-3. Zero-Quota Cookie-Based Upload Protocol (YT_COOKIES) with OAuth2 fallback.
-4. Gemini AI detection of high-retention 30-55s viral moments with high-CTR titles.
-5. High-quality 1080x1920 9:16 vertical video rendering with blurred ambient padding.
+1. Auto-PoToken Generation via Node.js + pytubefix.
+2. Real Browser TLS Impersonation via curl_cffi (web_embedded, visionos, tv_embedded).
+3. Universal Cookie Sanitizer (JSON arrays, raw strings, and Netscape format).
+4. Zero-Quota Cookie-Based Upload Protocol (YT_COOKIES) with OAuth2 fallback.
+5. Gemini AI detection of high-retention 30-55s viral moments with high-CTR titles.
+6. High-quality 1080x1920 9:16 vertical video rendering with blurred ambient padding.
 """
 
 import os
@@ -235,11 +236,7 @@ Output ONLY valid JSON:
     }
 
 def save_sanitized_cookies(raw_cookie_text, output_path):
-    """
-    Universal Cookie Converter:
-    Converts JSON arrays, raw HTTP Header strings (name=val;), Base64, or Netscape files
-    into a strictly formatted, valid Netscape cookie file for yt-dlp.
-    """
+    """Universal Cookie Converter for JSON arrays, raw strings, and Netscape files."""
     if not raw_cookie_text or not raw_cookie_text.strip():
         return None
     text = raw_cookie_text.strip()
@@ -258,7 +255,7 @@ def save_sanitized_cookies(raw_cookie_text, output_path):
         "# This is a generated cookie file for yt-dlp automation"
     ]
 
-    # Case A: JSON Cookie Array (from Cookie-Editor / EditThisCookie)
+    # JSON Cookie Array
     if text.startswith("[") or text.startswith("{"):
         try:
             parsed = json.loads(text)
@@ -283,7 +280,7 @@ def save_sanitized_cookies(raw_cookie_text, output_path):
         except Exception:
             pass
 
-    # Case B: HTTP Header String (e.g. VISITOR_INFO1_LIVE=xyz; LOGIN_INFO=abc; SID=123)
+    # HTTP Header String
     if ";" in text and "\t" not in text:
         pairs = [p.strip() for p in text.split(";") if "=" in p]
         if pairs:
@@ -299,7 +296,7 @@ def save_sanitized_cookies(raw_cookie_text, output_path):
                 f.write("\n".join(netscape_lines) + "\n")
             return output_path
 
-    # Case C: Standard Netscape format lines
+    # Standard Netscape lines
     raw_lines = text.splitlines()
     for line in raw_lines:
         line = line.strip()
@@ -326,9 +323,58 @@ def extract_video_id(url_or_id):
         return url_or_id.split("youtu.be/")[1].split("?")[0]
     return url_or_id
 
+def download_via_pytubefix(video_url, start_sec, duration, output_path):
+    """
+    Pro Strategy 1: Uses pytubefix with automatic JS/NodeJS PoToken generation.
+    Bypasses YouTube's BotGuard check on cloud runners.
+    """
+    try:
+        from pytubefix import YouTube
+        log("Attempting pytubefix engine with auto-PoToken...", "INFO")
+        for client_type in ['WEB', 'ANDROID', 'MWEB']:
+            try:
+                yt = YouTube(video_url, client=client_type)
+                stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+                if not stream:
+                    stream = yt.streams.filter(only_video=False, file_extension='mp4').first()
+                if stream:
+                    full_source = os.path.join(OUTPUT_DIR, "source_pytube.mp4")
+                    if os.path.exists(full_source):
+                        try:
+                            os.remove(full_source)
+                        except Exception:
+                            pass
+                    log(f"Downloading stream with pytubefix ({client_type} client, {stream.resolution or 'best'})...", "INFO")
+                    stream.download(output_path=OUTPUT_DIR, filename="source_pytube.mp4")
+                    if os.path.exists(full_source) and os.path.getsize(full_source) > 10000:
+                        log("Stream downloaded via pytubefix! Slicing via FFmpeg...", "SUCCESS")
+                        ff_cmd = [
+                            "ffmpeg", "-y",
+                            "-ss", str(start_sec),
+                            "-i", full_source,
+                            "-t", str(duration),
+                            "-c:v", "libx264",
+                            "-preset", "ultrafast",
+                            "-c:a", "aac",
+                            output_path
+                        ]
+                        subprocess.run(ff_cmd, capture_output=True, timeout=90)
+                        if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                            try:
+                                os.remove(full_source)
+                            except Exception:
+                                pass
+                            return True
+            except Exception as pe:
+                log(f"pytubefix client {client_type} notice: {pe}", "WARN")
+                continue
+    except Exception as e:
+        log(f"pytubefix engine notice: {e}", "WARN")
+    return False
+
 def download_via_ytdlp_python(video_url, start_sec, duration, output_path, cookies_path=None):
     """
-    Pro Strategy 1: Uses yt_dlp Python API with TLS Impersonation & Player Client rotation.
+    Pro Strategy 2: Uses yt_dlp Python API with visionos, tv_embedded, and web_embedded clients.
     """
     try:
         import yt_dlp
@@ -340,11 +386,10 @@ def download_via_ytdlp_python(video_url, start_sec, duration, output_path, cooki
                 pass
 
         client_configs = [
+            {'player_client': ['web_embedded', 'mweb'], 'impersonate': 'chrome'},
+            {'player_client': ['visionos', 'android_vr'], 'impersonate': None},
             {'player_client': ['tv_embedded', 'web_safari'], 'impersonate': 'chrome'},
-            {'player_client': ['tv', 'mweb'], 'impersonate': None},
-            {'player_client': ['ios', 'mweb'], 'impersonate': 'safari'},
-            {'player_client': ['android', 'ios'], 'impersonate': None},
-            {'player_client': ['web_safari', 'mweb'], 'impersonate': 'chrome'},
+            {'player_client': ['mweb', 'web_safari'], 'impersonate': 'safari'},
         ]
 
         for cfg in client_configs:
@@ -400,7 +445,7 @@ def download_via_ytdlp_python(video_url, start_sec, duration, output_path, cooki
 
 def download_via_direct_stream_url(video_url, start_sec, duration, output_path, cookies_path=None):
     """
-    Pro Strategy 2: Extracts direct googlevideo.com CDN URL and streams directly into FFmpeg input.
+    Pro Strategy 3: Extracts direct googlevideo.com CDN URL and streams directly into FFmpeg input.
     """
     try:
         import yt_dlp
@@ -410,7 +455,7 @@ def download_via_direct_stream_url(video_url, start_sec, duration, output_path, 
             'no_warnings': True,
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['tv_embedded', 'web_safari', 'android']
+                    'player_client': ['web_embedded', 'tv_embedded', 'android_vr']
                 }
             }
         }
@@ -551,18 +596,26 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
     video_id = extract_video_id(video_url)
     log(f"Downloading clip segment for '{video_id}' ({start_sec}s to {end_sec}s, duration: {duration}s)...", "FFMPEG")
     
-    if download_via_ytdlp_python(video_url, start_sec, duration, raw_clip_path, cookies_file):
-        log("Strategy 1 SUCCESS: Full source downloaded & sliced locally via yt-dlp Python!", "SUCCESS")
+    # Strategy 1: pytubefix with auto-PoToken generator
+    if download_via_pytubefix(video_url, start_sec, duration, raw_clip_path):
+        log("Strategy 1 SUCCESS: Stream downloaded and sliced via pytubefix PoToken!", "SUCCESS")
 
+    # Strategy 2: yt-dlp Python Full-file download + local FFmpeg slice
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Strategy 2: Trying direct CDN URL stream resolution into FFmpeg...", "INFO")
+        if download_via_ytdlp_python(video_url, start_sec, duration, raw_clip_path, cookies_file):
+            log("Strategy 2 SUCCESS: Full source downloaded & sliced locally via yt-dlp Python!", "SUCCESS")
+
+    # Strategy 3: Direct CDN Stream URL Resolution
+    if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
+        log("Strategy 3: Trying direct CDN URL stream resolution into FFmpeg...", "INFO")
         if download_via_direct_stream_url(video_url, start_sec, duration, raw_clip_path, cookies_file):
-            log("Strategy 2 SUCCESS: Direct CDN stream cut into FFmpeg!", "SUCCESS")
+            log("Strategy 3 SUCCESS: Direct CDN stream cut into FFmpeg!", "SUCCESS")
 
+    # Strategy 4: Gateway & Cobalt Stream Extractor
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Trying Strategy 3 (Cobalt & Gateway streams)...", "INFO")
+        log("Trying Strategy 4 (Cobalt & Gateway streams)...", "INFO")
         if download_segment_via_gateway(video_id, start_sec, duration, raw_clip_path):
-            log("Strategy 3 SUCCESS: Clip segment downloaded via gateway stream!", "SUCCESS")
+            log("Strategy 4 SUCCESS: Clip segment downloaded via gateway stream!", "SUCCESS")
 
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
         raise FileNotFoundError("Failed to download raw video clip segment after all extraction strategies.")
