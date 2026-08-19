@@ -3,7 +3,7 @@
 YouTube Shorts Automation Engine (run.py)
 =========================================
 Features:
-1. Multi-Tier Download Engine (pytubefix with native PoToken solver + Cobalt + Invidious + yt-dlp).
+1. Multi-Tier Download Engine (pytubefix Android/iOS + Authenticated yt-dlp + Cobalt + Gateways).
 2. Zero-Quota Cookie Upload Protocol (YT_COOKIES) with automatic fallback to OAuth API.
 3. Anti-duplication state engine (history.json) preventing repeated clips.
 4. Gemini AI viral moment detector (30-55s intervals with high-CTR titles).
@@ -242,31 +242,38 @@ def extract_video_id(url_or_id):
     return url_or_id
 
 def download_segment_via_pytubefix(video_url, start_sec, duration, output_path):
-    """Downloads segment using pytubefix which includes built-in PoToken & JS challenge solver."""
+    """Downloads segment using pytubefix with multi-client fallbacks (ANDROID, IOS, MWEB, TV)."""
     try:
-        log("Attempting stream download via pytubefix (Built-in PoToken Solver)...", "INFO")
         from pytubefix import YouTube
-        yt = YouTube(video_url, 'WEB')
-        stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
-        if not stream:
-            stream = yt.streams.filter(file_extension='mp4').first()
-        if stream and stream.url:
-            log("pytubefix extracted stream URL! Cutting segment via FFmpeg...", "SUCCESS")
-            ff_cmd = [
-                "ffmpeg", "-y",
-                "-ss", str(start_sec),
-                "-i", stream.url,
-                "-t", str(duration),
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-c:a", "aac",
-                output_path
-            ]
-            subprocess.run(ff_cmd, capture_output=True, timeout=90)
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
-                return True
+        # Android & iOS clients in pytubefix do NOT require Web PoToken challenges
+        clients_to_try = ['ANDROID', 'IOS', 'MWEB', 'ANDROID_VR', 'WEB']
+        for client_name in clients_to_try:
+            try:
+                log(f"Attempting stream download via pytubefix (Client: {client_name})...", "INFO")
+                yt = YouTube(video_url, client=client_name)
+                stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+                if not stream:
+                    stream = yt.streams.filter(file_extension='mp4').first()
+                if stream and stream.url:
+                    log(f"pytubefix ({client_name}) stream acquired! Cutting segment via FFmpeg...", "SUCCESS")
+                    ff_cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(start_sec),
+                        "-i", stream.url,
+                        "-t", str(duration),
+                        "-c:v", "libx264",
+                        "-preset", "ultrafast",
+                        "-c:a", "aac",
+                        output_path
+                    ]
+                    subprocess.run(ff_cmd, capture_output=True, timeout=90)
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                        return True
+            except Exception as ce:
+                log(f"pytubefix {client_name} notice: {ce}", "WARN")
+                continue
     except Exception as e:
-        log(f"pytubefix notice: {e}", "WARN")
+        log(f"pytubefix general notice: {e}", "WARN")
     return False
 
 def download_segment_via_gateway(video_id, start_sec, duration, output_path):
@@ -375,23 +382,17 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
     video_id = extract_video_id(video_url)
     log(f"Downloading clip segment for '{video_id}' ({start_sec}s to {end_sec}s, duration: {duration}s)...", "FFMPEG")
 
-    # Strategy 1: pytubefix with built-in JS challenge & PoToken generator
+    # Strategy 1: pytubefix with multi-client fallbacks (Android/iOS bypasses PoToken)
     if download_segment_via_pytubefix(video_url, start_sec, duration, raw_clip_path):
         log("Strategy 1 SUCCESS: Downloaded via pytubefix!", "SUCCESS")
 
-    # Strategy 2: Gateway & Cobalt Stream Extractor (immune to datacenter IP blocks)
-    if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Strategy 1 notice. Trying Strategy 2 (Cobalt & Gateway streams)...", "INFO")
-        if download_segment_via_gateway(video_id, start_sec, duration, raw_clip_path):
-            log("Strategy 2 SUCCESS: Clip segment downloaded via gateway stream!", "SUCCESS")
-
-    # Strategy 3: yt-dlp with iOS user-agent and mobile extractor
-    if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Strategy 2 notice. Trying Strategy 3 (yt-dlp iOS/mweb mobile spoofing)...", "WARN")
-        cmd_strat3 = [
+    # Strategy 2: Authenticated yt-dlp using YT_COOKIES (if available)
+    if (not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000) and cookies_file and os.path.exists(cookies_file):
+        log("Strategy 2: Trying yt-dlp with authenticated YT_COOKIES...", "INFO")
+        cmd_cookies = [
             "yt-dlp",
-            "--extractor-args", "youtube:player_client=mweb,web_creator,ios,android",
-            "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+            "--cookies", cookies_file,
+            "--extractor-args", "youtube:player_client=web,mweb,android",
             "-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
             "--download-sections", f"*{start_sec}-{end_sec}",
             "--force-keyframes-at-cuts",
@@ -399,20 +400,47 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
             "-o", raw_clip_path,
             video_url
         ]
-        subprocess.run(cmd_strat3, capture_output=True, text=True)
+        subprocess.run(cmd_cookies, capture_output=True, text=True)
+        if os.path.exists(raw_clip_path) and os.path.getsize(raw_clip_path) > 10000:
+            log("Strategy 2 SUCCESS: Downloaded via authenticated cookies yt-dlp!", "SUCCESS")
 
-    # Strategy 4: Direct HTTP media URL extraction into FFmpeg
+    # Strategy 3: Gateway & Cobalt Stream Extractor (immune to datacenter IP blocks)
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Strategy 3 notice. Trying Strategy 4 (yt-dlp direct HTTP stream seeker)...", "WARN")
+        log("Trying Strategy 3 (Cobalt & Gateway streams)...", "INFO")
+        if download_segment_via_gateway(video_id, start_sec, duration, raw_clip_path):
+            log("Strategy 3 SUCCESS: Clip segment downloaded via gateway stream!", "SUCCESS")
+
+    # Strategy 4: yt-dlp with Android / iOS mobile extractor
+    if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
+        log("Trying Strategy 4 (yt-dlp Android/iOS mobile spoofing)...", "WARN")
         cmd_strat4 = [
             "yt-dlp",
-            "--extractor-args", "youtube:player_client=mweb,ios",
+            "--extractor-args", "youtube:player_client=android,ios,mweb",
+            "-f", "18/22/best[ext=mp4]/best",
+            "--download-sections", f"*{start_sec}-{end_sec}",
+            "--force-keyframes-at-cuts",
+            "--no-check-certificates",
+            "-o", raw_clip_path,
+            video_url
+        ]
+        if cookies_file and os.path.exists(cookies_file):
+            cmd_strat4.extend(["--cookies", cookies_file])
+        subprocess.run(cmd_strat4, capture_output=True, text=True)
+
+    # Strategy 5: Direct HTTP media URL extraction into FFmpeg
+    if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
+        log("Trying Strategy 5 (yt-dlp direct stream URL extraction)...", "WARN")
+        cmd_strat5 = [
+            "yt-dlp",
+            "--extractor-args", "youtube:player_client=android,mweb",
             "-g",
             video_url
         ]
-        res4 = subprocess.run(cmd_strat4, capture_output=True, text=True)
-        if res4.returncode == 0 and res4.stdout.strip():
-            stream_urls = res4.stdout.strip().split("\n")
+        if cookies_file and os.path.exists(cookies_file):
+            cmd_strat5.extend(["--cookies", cookies_file])
+        res5 = subprocess.run(cmd_strat5, capture_output=True, text=True)
+        if res5.returncode == 0 and res5.stdout.strip():
+            stream_urls = res5.stdout.strip().split("\n")
             video_stream = stream_urls[0]
             audio_stream = stream_urls[1] if len(stream_urls) > 1 else stream_urls[0]
             ffmpeg_stream_cmd = [
