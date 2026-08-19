@@ -7,10 +7,10 @@ from googleapiclient.http import MediaFileUpload
 def download_via_invidious(video_id, output_filename, is_audio=False):
     """Uses decentralized Invidious servers to proxy the download, bypassing GitHub IP blocks for free."""
     instances = [
-        "https://vid.puffyan.us",
-        "https://invidious.protokolla.fi",
-        "https://inv.tux.pizza",
-        "https://invidious.incogniweb.net"
+        "[https://vid.puffyan.us](https://vid.puffyan.us)",
+        "[https://invidious.protokolla.fi](https://invidious.protokolla.fi)",
+        "[https://inv.tux.pizza](https://inv.tux.pizza)",
+        "[https://invidious.incogniweb.net](https://invidious.incogniweb.net)"
     ]
     
     itag = "140" if is_audio else "22"
@@ -45,7 +45,7 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
 
 def main():
     channel_id = os.environ.get("YT_CHANNEL_ID")
-    feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    feed_url = f"[https://www.youtube.com/feeds/videos.xml?channel_id=](https://www.youtube.com/feeds/videos.xml?channel_id=){channel_id}"
     feed = feedparser.parse(feed_url)
     
     if not feed.entries:
@@ -117,4 +117,61 @@ def main():
         generation_config=genai.GenerationConfig(response_mime_type="application/json")
     )
     
-    clean_json = response.text.strip().replace("```json", "").replace("
+    clean_json = response.text.strip().replace("```json", "").replace("```", "")
+    timestamps = json.loads(clean_json)
+    
+    start = int(timestamps["start"])
+    duration = int(timestamps["end"]) - start
+    print(f"🎯 Gemini selected: Start {start}s, Duration {duration}s", flush=True)
+
+    # 3. Download the FULL video
+    print("\n--- FETCHING VIDEO ---", flush=True)
+    download_via_invidious(video_id, "full_video.mp4", is_audio=False)
+
+    # 4. Crop to 9:16 vertical
+    print("\n--- CROPPING VIDEO ---", flush=True)
+    print(f"Cropping to 9:16 vertical...", flush=True)
+    crop_cmd = f'ffmpeg -ss {start} -i full_video.mp4 -t {duration} -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -c:v libx264 -preset fast -crf 22 -c:a aac output.mp4 -y'
+    subprocess.run(crop_cmd, shell=True, check=True)
+
+    # 5. Upload to YouTube Shorts
+    print("\n--- UPLOADING SHORT ---", flush=True)
+    creds = Credentials(
+        None,
+        refresh_token=os.environ["YT_REFRESH_TOKEN"],
+        token_uri="[https://oauth2.googleapis.com/token](https://oauth2.googleapis.com/token)",
+        client_id=os.environ["YT_CLIENT_ID"],
+        client_secret=os.environ["YT_CLIENT_SECRET"]
+    )
+    youtube = build("youtube", "v3", credentials=creds)
+    
+    body = {
+        "snippet": {
+            "title": f"{video_title[:80]} #Shorts",
+            "description": "Fun moment from our latest video! #kids #nurseryrhymes #Shorts",
+            "categoryId": "22"
+        },
+        "status": {
+            "privacyStatus": "public",
+            "selfDeclaredMadeForKids": True
+        }
+    }
+    
+    youtube.videos().insert(
+        part="snippet,status",
+        body=body,
+        media_body=MediaFileUpload("output.mp4", mimetype="video/mp4")
+    ).execute()
+
+    print("✅ Upload complete!", flush=True)
+
+    with open("processed.txt", "a") as f:
+        f.write(f"{video_id}\n")
+
+    try:
+        genai.delete_file(audio_file.name)
+    except:
+        pass
+
+if __name__ == "__main__":
+    main()
