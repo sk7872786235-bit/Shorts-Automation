@@ -1,6 +1,5 @@
 import os, sys, json, feedparser, subprocess, requests, time
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
@@ -82,28 +81,24 @@ def main():
     print("\n--- AI ANALYSIS ---", flush=True)
     print("Uploading audio to Gemini...", flush=True)
     
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"].strip())
+    # Strip whitespace to prevent the previous "API key not valid" crash
+    api_key = os.environ["GEMINI_API_KEY"].strip()
+    genai.configure(api_key=api_key)
     
-    audio_file = client.files.upload(
-        file="audio.m4a", 
-        config={'mime_type': 'audio/mp4'}
-    )
+    # The stable SDK infers mime_types naturally
+    audio_file = genai.upload_file("audio.m4a")
     
     print("Waiting for Google's servers to process the audio track...", flush=True)
-    
-    while True:
-        audio_file = client.files.get(name=audio_file.name)
-        state_str = str(getattr(audio_file, 'state', ''))
+    while audio_file.state.name == "PROCESSING":
+        print(".", end="", flush=True)
+        time.sleep(2)
+        audio_file = genai.get_file(audio_file.name)
         
-        if "PROCESSING" in state_str:
-            print(".", end="", flush=True)
-            time.sleep(3)
-        elif "FAILED" in state_str:
-            print("\n❌ Gemini failed to process the audio file.", flush=True)
-            sys.exit(1)
-        else:
-            print("\n✅ Audio ready!", flush=True)
-            break
+    if audio_file.state.name == "FAILED":
+        print("\n❌ Gemini failed to process audio.", flush=True)
+        sys.exit(1)
+        
+    print("\n✅ Audio ready!", flush=True)
     
     prompt = """
     Listen to this audio track from a kids' YouTube video. 
@@ -114,75 +109,12 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # THE FIX: Explicitly wrap the file so the SDK doesn't mistake it for a function
-    audio_part = types.Part.from_uri(
-        file_uri=audio_file.uri,
-        mime_type="audio/mp4"
+    # Using the rock-solid 1.5 flash model
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    
+    response = model.generate_content(
+        [audio_file, prompt],
+        generation_config=genai.GenerationConfig(response_mime_type="application/json")
     )
     
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=[audio_part, prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-        )
-    )
-    
-    clean_json = response.text.strip().replace("```json", "").replace("```", "")
-    timestamps = json.loads(clean_json)
-    
-    start = int(timestamps["start"])
-    duration = int(timestamps["end"]) - start
-    print(f"🎯 Gemini selected: Start {start}s, Duration {duration}s", flush=True)
-
-    # 3. Download the FULL video
-    print("\n--- FETCHING VIDEO ---", flush=True)
-    download_via_invidious(video_id, "full_video.mp4", is_audio=False)
-
-    # 4. Crop to 9:16 vertical
-    print("\n--- CROPPING VIDEO ---", flush=True)
-    print(f"Cropping to 9:16 vertical...", flush=True)
-    crop_cmd = f'ffmpeg -ss {start} -i full_video.mp4 -t {duration} -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -c:v libx264 -preset fast -crf 22 -c:a aac output.mp4 -y'
-    subprocess.run(crop_cmd, shell=True, check=True)
-
-    # 5. Upload to YouTube Shorts
-    print("\n--- UPLOADING SHORT ---", flush=True)
-    creds = Credentials(
-        None,
-        refresh_token=os.environ["YT_REFRESH_TOKEN"],
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.environ["YT_CLIENT_ID"],
-        client_secret=os.environ["YT_CLIENT_SECRET"]
-    )
-    youtube = build("youtube", "v3", credentials=creds)
-    
-    body = {
-        "snippet": {
-            "title": f"{video_title[:80]} #Shorts",
-            "description": "Fun moment from our latest video! #kids #nurseryrhymes #Shorts",
-            "categoryId": "22"
-        },
-        "status": {
-            "privacyStatus": "public",
-            "selfDeclaredMadeForKids": True
-        }
-    }
-    
-    youtube.videos().insert(
-        part="snippet,status",
-        body=body,
-        media_body=MediaFileUpload("output.mp4", mimetype="video/mp4")
-    ).execute()
-
-    print("✅ Upload complete!", flush=True)
-
-    with open("processed.txt", "a") as f:
-        f.write(f"{video_id}\n")
-
-    try:
-        client.files.delete(name=audio_file.name)
-    except:
-        pass
-
-if __name__ == "__main__":
-    main()
+    clean_json = response.text.strip().replace("```json", "").replace("
