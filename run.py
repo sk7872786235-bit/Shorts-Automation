@@ -7,10 +7,10 @@ from googleapiclient.http import MediaFileUpload
 def download_via_invidious(video_id, output_filename, is_audio=False):
     """Uses decentralized Invidious servers to proxy the download, bypassing GitHub IP blocks for free."""
     instances = [
-        "[https://vid.puffyan.us](https://vid.puffyan.us)",
-        "[https://invidious.protokolla.fi](https://invidious.protokolla.fi)",
-        "[https://inv.tux.pizza](https://inv.tux.pizza)",
-        "[https://invidious.incogniweb.net](https://invidious.incogniweb.net)"
+        "https://vid.puffyan.us",
+        "https://invidious.protokolla.fi",
+        "https://inv.tux.pizza",
+        "https://invidious.incogniweb.net"
     ]
     
     itag = "140" if is_audio else "22"
@@ -45,11 +45,21 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
 
 def main():
     channel_id = os.environ.get("YT_CHANNEL_ID")
-    feed_url = f"[https://www.youtube.com/feeds/videos.xml?channel_id=](https://www.youtube.com/feeds/videos.xml?channel_id=){channel_id}"
+    
+    # Check if the secret exists
+    if not channel_id:
+        print("🚨 ERROR: YT_CHANNEL_ID is missing from your GitHub Secrets!", flush=True)
+        sys.exit(1)
+        
+    print(f"Fetching RSS feed for channel: {channel_id}", flush=True)
+    
+    # Pretend to be a Windows Web Browser so YouTube doesn't block the RSS request
+    feedparser.USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id.strip()}"
     feed = feedparser.parse(feed_url)
     
     if not feed.entries:
-        print("No videos found on channel.", flush=True)
+        print("🚨 No videos found! Ensure your YT_CHANNEL_ID starts with 'UC' and is NOT a @handle.", flush=True)
         sys.exit(0)
 
     if not os.path.exists("processed.txt"):
@@ -81,11 +91,9 @@ def main():
     print("\n--- AI ANALYSIS ---", flush=True)
     print("Uploading audio to Gemini...", flush=True)
     
-    # Strip whitespace to prevent the previous "API key not valid" crash
     api_key = os.environ["GEMINI_API_KEY"].strip()
     genai.configure(api_key=api_key)
     
-    # The stable SDK infers mime_types naturally
     audio_file = genai.upload_file("audio.m4a")
     
     print("Waiting for Google's servers to process the audio track...", flush=True)
@@ -109,7 +117,6 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # Using the rock-solid 1.5 flash model
     model = genai.GenerativeModel("gemini-1.5-flash")
     
     response = model.generate_content(
@@ -139,7 +146,7 @@ def main():
     creds = Credentials(
         None,
         refresh_token=os.environ["YT_REFRESH_TOKEN"],
-        token_uri="[https://oauth2.googleapis.com/token](https://oauth2.googleapis.com/token)",
+        token_uri="https://oauth2.googleapis.com/token",
         client_id=os.environ["YT_CLIENT_ID"],
         client_secret=os.environ["YT_CLIENT_SECRET"]
     )
