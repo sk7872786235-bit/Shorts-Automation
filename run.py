@@ -1,6 +1,5 @@
 import os, sys, json, feedparser, subprocess, requests, time
 from google import genai
-from google.genai import types
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
@@ -84,15 +83,11 @@ def main():
     
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"].strip())
     
-    # FORCE the mime_type so the raw Linux server doesn't upload it as generic binary data
-    audio_file = client.files.upload(
-        file="audio.m4a", 
-        config={'mime_type': 'audio/mp4'}
-    )
+    # We let the SDK natively detect the format without forcing an override
+    audio_file = client.files.upload(file="audio.m4a")
     
     print("Waiting for Google's servers to process the audio track...", flush=True)
     
-    # Active polling loop to ensure the file is completely ready before asking questions
     while True:
         audio_file = client.files.get(name=audio_file.name)
         state_str = str(getattr(audio_file, 'state', ''))
@@ -110,19 +105,16 @@ def main():
     prompt = """
     Listen to this audio track from a kids' YouTube video. 
     Find the most engaging, catchy 30 to 50 second segment (like the chorus of a song).
-    Return ONLY a valid JSON object with the exact start and end time in seconds. No formatting.
+    Return ONLY a valid JSON object with the exact start and end time in seconds. No formatting, no markdown blocks.
     Example: {"start": 12, "end": 45}
     """
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # Force pure JSON output to prevent AFC warnings and formatting bugs
+    # Removed the strict JSON config argument that was causing the 400 crash
     response = client.models.generate_content(
         model="gemini-3.6-flash",
-        contents=[audio_file, prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-        )
+        contents=[audio_file, prompt]
     )
     
     clean_json = response.text.strip().replace("```json", "").replace("```", "")
