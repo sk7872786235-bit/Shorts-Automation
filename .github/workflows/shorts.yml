@@ -8,14 +8,14 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Needed to push processed.txt updates
+      contents: write
     steps:
       - uses: actions/checkout@v4
+      
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
           
       - name: Install FFmpeg & Python Dependencies
         run: |
@@ -36,7 +36,6 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          # Create processed.txt if it doesn't exist yet
           touch processed.txt 
           git add processed.txt
           git commit -m "chore: record processed video [skip ci]" || echo "No changes to commit"
