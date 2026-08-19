@@ -15,12 +15,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
           
       - name: Install FFmpeg & Python Dependencies
+        # Pinned youtube-transcript-api to 0.6.3 to bypass their breaking update
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
-          pip install yt-dlp youtube-transcript-api google-genai google-api-python-client google-auth feedparser
+          pip install yt-dlp youtube-transcript-api==0.6.3 google-genai google-api-python-client google-auth feedparser
           
       - name: Run Automation Script
         env:
