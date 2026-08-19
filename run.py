@@ -11,7 +11,11 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
         "https://vid.puffyan.us",
         "https://invidious.protokolla.fi",
         "https://inv.tux.pizza",
-        "https://invidious.incogniweb.net"
+        "https://invidious.incogniweb.net",
+        "https://invidious.nerdvpn.de",
+        "https://invidious.lunar.icu",
+        "https://invidious.slipfox.xyz",
+        "https://invidious.weblibre.org"
     ]
     
     itag = "140" if is_audio else "22"
@@ -28,10 +32,22 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
                 response = requests.get(url, stream=True, timeout=20)
                 
             if response.status_code == 200:
+                # SAFETY CHECK 1: Ensure the server isn't sending us an HTML error page in disguise
+                content_type = response.headers.get('Content-Type', '').lower()
+                if 'text/html' in content_type or 'application/json' in content_type:
+                    print("❌ Proxy returned a web page instead of a media file. Trying next...", flush=True)
+                    continue
+                    
                 with open(output_filename, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
+                            
+                # SAFETY CHECK 2: Ensure the file isn't corrupted or empty (less than 100KB)
+                if os.path.getsize(output_filename) < 100000:
+                    print("❌ Downloaded file is corrupt or suspiciously small. Trying next...", flush=True)
+                    continue
+                    
                 print(f"✅ Successfully downloaded to {output_filename}!", flush=True)
                 return 
             else:
@@ -82,13 +98,9 @@ def main():
 
     print(f"Processing Kids Video: {video_title} ({video_id})", flush=True)
 
-    # 1. Download raw AUDIO
+    # 1. Download AUDIO natively as M4A
     print("\n--- FETCHING AUDIO ---", flush=True)
-    download_via_invidious(video_id, "audio_raw.m4a", is_audio=True)
-    
-    # THE FIX: Convert the audio to standard MP3 so Gemini natively supports it
-    print("Converting audio to MP3 for Gemini...", flush=True)
-    subprocess.run('ffmpeg -i audio_raw.m4a audio.mp3 -y', shell=True, check=True)
+    download_via_invidious(video_id, "audio.m4a", is_audio=True)
 
     # 2. Upload Audio to Gemini
     print("\n--- AI ANALYSIS ---", flush=True)
@@ -98,8 +110,8 @@ def main():
     client = genai.Client(api_key=api_key)
     
     audio_file = client.files.upload(
-        file="audio.mp3", 
-        config={'mime_type': 'audio/mp3'}
+        file="audio.m4a", 
+        config={'mime_type': 'audio/mp4'}
     )
     
     print("Waiting for Google's servers to process the audio track...", flush=True)
@@ -126,10 +138,10 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # Packaged safely with explicit keyword arguments and the valid MP3 mime_type
+    # Packaged safely with explicit keyword arguments to avoid the Python syntax crash
     audio_part = types.Part.from_uri(
         file_uri=audio_file.uri, 
-        mime_type="audio/mp3"
+        mime_type="audio/mp4"
     )
     
     response = client.models.generate_content(
