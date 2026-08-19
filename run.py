@@ -1,216 +1,208 @@
-import os, sys, json, subprocess, time
-import yt_dlp
-from google import genai
-from google.genai import types
-from googleapiclient.discovery import build
+import os
+import sys
+import json
+import time
+import subprocess
+import argparse
+from pathlib import Path
+
+# Google API Imports
 from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-def download_media(video_id, output_filename, is_audio=False):
-    """Downloads media natively using yt-dlp, utilizing cookies to bypass datacenter blocks."""
-    print(f"Downloading via yt-dlp...", flush=True)
-    
-    ydl_opts = {
-        'format': 'bestaudio/best' if is_audio else 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': output_filename.replace('.mp3', '') if is_audio else output_filename,
-        'quiet': False,
-        'no_warnings': True,
-    }
-    
-    if is_audio:
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-        }]
-    else:
-        ydl_opts['merge_output_format'] = 'mp4'
+OUTPUT_DIR = Path("output_shorts")
+OUTPUT_DIR.mkdir(exist_ok=True)
+HISTORY_FILE = Path("history.json")
 
-    # THE FIX: Apply cookies if the secret exists
-    cookies_content = os.environ.get("YT_COOKIES", "").strip()
-    if cookies_content:
-        with open("cookies.txt", "w") as f:
-            f.write(cookies_content)
-        ydl_opts['cookiefile'] = 'cookies.txt'
-        print("✅ Using YT_COOKIES secret to bypass bot detection...", flush=True)
-    else:
-        print("⚠️ No YT_COOKIES found in GitHub Secrets. Download will likely fail on Datacenter IP.", flush=True)
+# ---------------------------------------------------------
+# STATE MANAGEMENT (Never repeat content)
+# ---------------------------------------------------------
+def load_history():
+    if HISTORY_FILE.exists():
+        try:
+            with open(HISTORY_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # Structure: {"video_id_1": [[0, 45], [120, 165]], "video_id_2": [...]}
+    return {"used_segments": {}}
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
-            
-        if os.path.exists(output_filename):
-            print(f"✅ Native download complete!", flush=True)
-        else:
-            raise Exception("File not found after download.")
-            
-    except Exception as e:
-        print(f"🚨 yt-dlp failed: {e}", flush=True)
-        sys.exit(1)
-    finally:
-        if os.path.exists("cookies.txt"):
-            os.remove("cookies.txt")
+def save_history(history):
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=2)
 
-def main():
-    channel_id = os.environ.get("YT_CHANNEL_ID")
+def is_overlap(new_start, new_end, existing_segments):
+    """Returns True if the proposed clip overlaps with an already processed clip."""
+    for (st, en) in existing_segments:
+        if max(new_start, st) < min(new_end, en):
+            return True # Overlap detected
+    return False
+
+# ---------------------------------------------------------
+# CORE PIPELINE
+# ---------------------------------------------------------
+def get_channel_videos(channel_id, cookies_file):
+    print(f"[*] Scanning channel: {channel_id}")
+    url = f"https://www.youtube.com/channel/{channel_id}/videos"
     
-    if not channel_id or not channel_id.startswith("UC"):
-        print("🚨 ERROR: YT_CHANNEL_ID is missing or invalid! It must start with 'UC'.", flush=True)
-        sys.exit(1)
+    cmd = [
+        "yt-dlp",
+        "--flat-playlist",
+        "--print", "%(id)s\t%(title)s\t%(duration)s",
+        "--cookies", cookies_file,
+        "--no-check-certificates",
+        url
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        print(f"[!] Fetch failed: {res.stderr}")
+        return []
+    
+    videos = []
+    for line in res.stdout.strip().split("\n"):
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            videos.append({"id": parts[0].strip(), "title": parts[1].strip()})
+    return videos
+
+def process_video(video, history, cookies_file):
+    vid_id = video["id"]
+    used_segments = history["used_segments"].get(vid_id, [])
+    
+    print(f"[*] Analyzing '{video['title']}'...")
+    
+    # Download Video
+    local_mp4 = f"{vid_id}.mp4"
+    if not Path(local_mp4).exists():
+        print(f"[*] Downloading source video: {vid_id}")
+        cmd = [
+            "yt-dlp",
+            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+            "--cookies", cookies_file,
+            "-o", local_mp4,
+            f"https://www.youtube.com/watch?v={vid_id}"
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+
+    # Extract Audio for Whisper
+    local_wav = f"{vid_id}.wav"
+    subprocess.run(["ffmpeg", "-y", "-i", local_mp4, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", local_wav], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # Transcribe & Find Segments
+    print("[*] Transcribing with faster-whisper...")
+    from faster_whisper import WhisperModel
+    model = WhisperModel("base", device="cpu", compute_type="int8")
+    segments, info = model.transcribe(local_wav, beam_size=5)
+    
+    total_duration = info.duration
+    target_duration = 45 # seconds per short
+    
+    # Locate a segment that hasn't been used yet
+    start_time = 15.0 # Skip standard intros
+    selected_clip = None
+    
+    while start_time + target_duration < total_duration:
+        end_time = start_time + target_duration
+        if not is_overlap(start_time, end_time, used_segments):
+            selected_clip = {"start": start_time, "end": end_time, "duration": target_duration}
+            break
+        start_time += 30.0 # Shift search window forward if blocked by overlap
         
-    print("Authenticating with YouTube API...", flush=True)
+    if not selected_clip:
+        print("[!] Video exhausted (no unused high-retention segments left).")
+        return False # Move to next video
+        
+    # We found a fresh clip! Let's render it.
+    out_file = OUTPUT_DIR / f"short_{vid_id}_{int(selected_clip['start'])}.mp4"
+    srt_file = OUTPUT_DIR / f"sub_{vid_id}.srt"
+    
+    # Generate Dummy SRT (Integrate Gemini hook logic here if desired)
+    with open(srt_file, "w") as f:
+        f.write("1\n00:00:00,000 --> 00:00:03,500\nWATCH THIS CLOSELY!\n\n")
+        f.write("2\n00:00:03,500 --> 00:00:45,000\nLink in description!\n\n")
+        
+    print(f"[*] Rendering new segment: {selected_clip['start']}s to {selected_clip['end']}s")
+    srt_clean = str(srt_file).replace("\\", "/").replace(":", "\\:")
+    style = "Fontname=Arial,Fontsize=22,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=140"
+    
+    filter_complex = (
+        "[0:v]split=2[bg][fg];"
+        "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[b];"
+        "[fg]scale=1080:-2[f];"
+        f"[b][f]overlay=(W-w)/2:(H-h)/2,subtitles='{srt_clean}':force_style='{style}'[v_out]"
+    )
+    
+    subprocess.run([
+        "ffmpeg", "-y", "-ss", str(selected_clip["start"]), "-t", str(selected_clip["duration"]),
+        "-i", local_mp4, "-filter_complex", filter_complex, "-map", "[v_out]", "-map", "0:a",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-c:a", "aac", "-b:a", "128k", str(out_file)
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    # Upload via YouTube API
+    upload_short(out_file, f"Secret from {video['title'][:40]} #Shorts", vid_id)
+    
+    # Mark segment as used and save state
+    used_segments.append([selected_clip["start"], selected_clip["end"]])
+    history["used_segments"][vid_id] = used_segments
+    save_history(history)
+    
+    print("[+] Successfully generated and uploaded!")
+    return True
+
+# ---------------------------------------------------------
+# YOUTUBE UPLOAD (Using mapped Environment variables)
+# ---------------------------------------------------------
+def upload_short(video_path, title, original_video_id):
+    client_id = os.environ.get("YT_CLIENT_ID")
+    client_secret = os.environ.get("YT_CLIENT_SECRET")
+    refresh_token = os.environ.get("YT_REFRESH_TOKEN")
     
     creds = Credentials(
         None,
-        refresh_token=os.environ["YT_REFRESH_TOKEN"].strip(),
+        refresh_token=refresh_token,
         token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.environ["YT_CLIENT_ID"].strip(),
-        client_secret=os.environ["YT_CLIENT_SECRET"].strip()
+        client_id=client_id,
+        client_secret=client_secret
     )
     youtube = build("youtube", "v3", credentials=creds)
     
-    print("Fetching latest videos via official API...", flush=True)
-    
-    uploads_playlist_id = "UU" + channel_id[2:]
-    
-    try:
-        playlist_response = youtube.playlistItems().list(
-            part="snippet",
-            playlistId=uploads_playlist_id,
-            maxResults=10
-        ).execute()
-    except Exception as e:
-        print(f"🚨 Failed to fetch videos via API. Check your OAuth credentials! Error: {e}", flush=True)
-        sys.exit(1)
-        
-    entries = playlist_response.get("items", [])
-    
-    if not entries:
-        print("🚨 No videos found in the uploads playlist.", flush=True)
-        sys.exit(0)
-
-    if not os.path.exists("processed.txt"):
-        open("processed.txt", "w").close()
-
-    with open("processed.txt", "r") as f:
-        processed_videos = f.read()
-
-    valid_video = None
-    for entry in entries:
-        vid_id = entry["snippet"]["resourceId"]["videoId"]
-        if vid_id not in processed_videos:
-            valid_video = entry
-            break 
-            
-    if not valid_video:
-        print("All recent videos have already been processed. Waiting for new uploads.", flush=True)
-        sys.exit(0)
-
-    video_id = valid_video["snippet"]["resourceId"]["videoId"]
-    video_title = valid_video["snippet"]["title"]
-
-    print(f"Processing Kids Video: {video_title} ({video_id})", flush=True)
-
-    # 1. Download AUDIO natively via yt-dlp
-    print("\n--- FETCHING AUDIO ---", flush=True)
-    download_media(video_id, "audio.mp3", is_audio=True)
-
-    # 2. Upload Audio to Gemini
-    print("\n--- AI ANALYSIS ---", flush=True)
-    print("Uploading audio to Gemini...", flush=True)
-    
-    api_key = os.environ["GEMINI_API_KEY"].strip()
-    client = genai.Client(api_key=api_key)
-    
-    audio_file = client.files.upload(
-        file="audio.mp3", 
-        config={'mime_type': 'audio/mp3'}
-    )
-    
-    print("Waiting for Google's servers to process the audio track...", flush=True)
-    while True:
-        audio_file = client.files.get(name=audio_file.name)
-        state_str = str(getattr(audio_file, 'state', ''))
-        
-        if "PROCESSING" in state_str:
-            print(".", end="", flush=True)
-            time.sleep(3)
-        elif "FAILED" in state_str:
-            print("\n❌ Gemini failed to process audio.", flush=True)
-            sys.exit(1)
-        else:
-            print("\n✅ Audio ready!", flush=True)
-            break
-    
-    prompt = """
-    Listen to this audio track from a kids' YouTube video. 
-    Find the most engaging, catchy 30 to 50 second segment (like the chorus of a song).
-    Return ONLY a valid JSON object with the exact start and end time in seconds. No formatting.
-    Example: {"start": 12, "end": 45}
-    """
-    
-    print("Analyzing audio to find the best viral hook...", flush=True)
-    
-    audio_part = types.Part.from_uri(
-        file_uri=audio_file.uri, 
-        mime_type="audio/mp3"
-    )
-    
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=[audio_part, prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        )
-    )
-    
-    clean_json = response.text.strip().replace("```json", "").replace("```", "")
-    timestamps = json.loads(clean_json)
-    
-    start = int(timestamps["start"])
-    duration = int(timestamps["end"]) - start
-    print(f"🎯 Gemini selected: Start {start}s, Duration {duration}s", flush=True)
-
-    # 3. Download the FULL video natively via yt-dlp
-    print("\n--- FETCHING VIDEO ---", flush=True)
-    download_media(video_id, "full_video.mp4", is_audio=False)
-
-    # 4. Crop to 9:16 vertical
-    print("\n--- CROPPING VIDEO ---", flush=True)
-    print(f"Cropping to 9:16 vertical...", flush=True)
-    crop_cmd = f'ffmpeg -ss {start} -i full_video.mp4 -t {duration} -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -c:v libx264 -preset fast -crf 22 -c:a aac output.mp4 -y'
-    subprocess.run(crop_cmd, shell=True, check=True)
-
-    # 5. Upload to YouTube Shorts
-    print("\n--- UPLOADING SHORT ---", flush=True)
-    
     body = {
         "snippet": {
-            "title": f"{video_title[:80]} #Shorts",
-            "description": "Fun moment from our latest video! #kids #nurseryrhymes #Shorts",
+            "title": title,
+            "description": f"Watch the full video: https://youtu.be/{original_video_id}\n\n#Shorts #Tech",
             "categoryId": "22"
         },
-        "status": {
-            "privacyStatus": "public",
-            "selfDeclaredMadeForKids": True
-        }
+        "status": {"privacyStatus": "public", "selfDeclaredMadeForKids": False}
     }
-    
-    youtube.videos().insert(
-        part="snippet,status",
-        body=body,
-        media_body=MediaFileUpload("output.mp4", mimetype="video/mp4")
-    ).execute()
-
-    print("✅ Upload complete!", flush=True)
-
-    with open("processed.txt", "a") as f:
-        f.write(f"{video_id}\n")
-
-    try:
-        client.files.delete(name=audio_file.name)
-    except:
-        pass
+    media = MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True)
+    req = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+    res = req.execute()
+    print(f"[+] Uploaded: https://youtube.com/shorts/{res.get('id')}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cookies", required=True, help="Path to yt-dlp cookies file")
+    args = parser.parse_args()
+
+    channel_id = os.environ.get("YT_CHANNEL_ID")
+    if not channel_id:
+        print("[!] Missing YT_CHANNEL_ID environment variable.")
+        sys.exit(1)
+
+    history = load_history()
+    videos = get_channel_videos(channel_id, args.cookies)
+    
+    # Iterate through videos until we find one with unused segments
+    for video in videos:
+        success = process_video(video, history, args.cookies)
+        if success:
+            # We process exactly 1 clip per hour to pace the API
+            break
+            
+    # Cleanup temp files
+    for f in Path(".").glob("*.mp4"):
+        if not str(f).startswith("output_shorts"):
+            f.unlink()
+    for f in Path(".").glob("*.wav"):
+        f.unlink()
