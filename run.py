@@ -1,4 +1,4 @@
-import os, sys, json, feedparser, subprocess, requests, time
+import os, sys, json, subprocess, requests, time
 from google import genai
 from google.genai import types
 from googleapiclient.discovery import build
@@ -10,7 +10,6 @@ def download_via_cobalt(video_id, output_filename, is_audio=False):
     yt_url = f"https://www.youtube.com/watch?v={video_id}"
     print("Fetching fresh list of Cobalt proxies...", flush=True)
     
-    # Massive fallback list of known public Cobalt instances
     instances = [
         "https://api.cobalt.tools",
         "https://api.cobalt.my.id",
@@ -22,7 +21,6 @@ def download_via_cobalt(video_id, output_filename, is_audio=False):
     ]
     
     try:
-        # Dynamically fetch the latest active community instances
         r = requests.get("https://instances.hyper.lol/instances.json", timeout=10)
         data = r.json()
         dynamic_instances = [inst["api_url"] for inst in data if inst.get("api_online") and inst.get("trust_status") == "trusted"]
@@ -31,7 +29,6 @@ def download_via_cobalt(video_id, output_filename, is_audio=False):
     except Exception as e:
         print(f"Failed to fetch dynamic list, relying on hardcoded fallbacks: {e}", flush=True)
 
-    # De-duplicate while preserving order
     seen = set()
     instances = [x for x in instances if not (x in seen or seen.add(x))]
 
@@ -46,7 +43,6 @@ def download_via_cobalt(video_id, output_filename, is_audio=False):
         try:
             base_url = instance.rstrip("/")
             
-            # v7 API Payload (New Standard)
             payload_v7 = {
                 "url": yt_url,
                 "downloadMode": "audio" if is_audio else "auto",
@@ -56,7 +52,6 @@ def download_via_cobalt(video_id, output_filename, is_audio=False):
             else:
                 payload_v7["videoQuality"] = "1080"
                 
-            # v6 API Payload (Legacy Fallback)
             payload_v6 = {
                 "url": yt_url,
                 "isAudioOnly": is_audio,
@@ -64,11 +59,9 @@ def download_via_cobalt(video_id, output_filename, is_audio=False):
                 "vQuality": "1080"
             }
             
-            # Try v7 standard first
             response = requests.post(f"{base_url}/", json=payload_v7, headers=headers, timeout=15)
             
             if response.status_code == 404 or response.status_code == 405:
-                # If the server is older, fallback to v6
                 response = requests.post(f"{base_url}/api/json", json=payload_v6, headers=headers, timeout=15)
                 
             if response.status_code != 200:
@@ -86,7 +79,6 @@ def download_via_cobalt(video_id, output_filename, is_audio=False):
                 continue
                 
             print(f"Connecting to proxy stream...", flush=True)
-            # Note: We omit the API headers here because we are fetching the raw file
             stream_response = requests.get(download_url, stream=True, timeout=30)
             
             if stream_response.status_code == 200:
@@ -114,18 +106,41 @@ def download_via_cobalt(video_id, output_filename, is_audio=False):
 def main():
     channel_id = os.environ.get("YT_CHANNEL_ID")
     
-    if not channel_id:
-        print("🚨 ERROR: YT_CHANNEL_ID is missing from your GitHub Secrets!", flush=True)
+    if not channel_id or not channel_id.startswith("UC"):
+        print("🚨 ERROR: YT_CHANNEL_ID is missing or invalid! It must start with 'UC'.", flush=True)
         sys.exit(1)
         
-    print(f"Fetching RSS feed for channel: {channel_id}", flush=True)
+    print("Authenticating with YouTube API...", flush=True)
     
-    feedparser.USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id.strip()}"
-    feed = feedparser.parse(feed_url)
+    # 1. Authenticate with YouTube API FIRST to bypass public RSS blocks
+    creds = Credentials(
+        None,
+        refresh_token=os.environ["YT_REFRESH_TOKEN"].strip(),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ["YT_CLIENT_ID"].strip(),
+        client_secret=os.environ["YT_CLIENT_SECRET"].strip()
+    )
+    youtube = build("youtube", "v3", credentials=creds)
     
-    if not feed.entries:
-        print("🚨 No videos found! Ensure your YT_CHANNEL_ID starts with 'UC'.", flush=True)
+    print("Fetching latest videos via official API...", flush=True)
+    
+    # Every channel has an invisible "Uploads" playlist using 'UU' instead of 'UC'
+    uploads_playlist_id = "UU" + channel_id[2:]
+    
+    try:
+        playlist_response = youtube.playlistItems().list(
+            part="snippet",
+            playlistId=uploads_playlist_id,
+            maxResults=10
+        ).execute()
+    except Exception as e:
+        print(f"🚨 Failed to fetch videos via API. Check your OAuth credentials! Error: {e}", flush=True)
+        sys.exit(1)
+        
+    entries = playlist_response.get("items", [])
+    
+    if not entries:
+        print("🚨 No videos found in the uploads playlist.", flush=True)
         sys.exit(0)
 
     if not os.path.exists("processed.txt"):
@@ -135,8 +150,9 @@ def main():
         processed_videos = f.read()
 
     valid_video = None
-    for entry in feed.entries:
-        if entry.yt_videoid not in processed_videos:
+    for entry in entries:
+        vid_id = entry["snippet"]["resourceId"]["videoId"]
+        if vid_id not in processed_videos:
             valid_video = entry
             break 
             
@@ -144,12 +160,12 @@ def main():
         print("All recent videos have already been processed. Waiting for new uploads.", flush=True)
         sys.exit(0)
 
-    video_id = valid_video.yt_videoid
-    video_title = valid_video.title
+    video_id = valid_video["snippet"]["resourceId"]["videoId"]
+    video_title = valid_video["snippet"]["title"]
 
     print(f"Processing Kids Video: {video_title} ({video_id})", flush=True)
 
-    # 1. Download AUDIO via Cobalt (Natively fetched as MP3)
+    # 1. Download AUDIO via Cobalt
     print("\n--- FETCHING AUDIO ---", flush=True)
     download_via_cobalt(video_id, "audio.mp3", is_audio=True)
 
@@ -221,14 +237,6 @@ def main():
 
     # 5. Upload to YouTube Shorts
     print("\n--- UPLOADING SHORT ---", flush=True)
-    creds = Credentials(
-        None,
-        refresh_token=os.environ["YT_REFRESH_TOKEN"],
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.environ["YT_CLIENT_ID"],
-        client_secret=os.environ["YT_CLIENT_SECRET"]
-    )
-    youtube = build("youtube", "v3", credentials=creds)
     
     body = {
         "snippet": {
