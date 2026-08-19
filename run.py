@@ -1,4 +1,4 @@
-import os, sys, json, subprocess, time
+import os, sys, json, subprocess, requests, time
 import yt_dlp
 from google import genai
 from google.genai import types
@@ -7,7 +7,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
 
 def download_media(video_id, output_filename, is_audio=False):
-    """Downloads media natively using the enterprise standard yt-dlp."""
+    """Downloads media natively using yt-dlp with client disguises, plus an API fallback."""
     print(f"Downloading via yt-dlp...", flush=True)
     
     ydl_opts = {
@@ -15,6 +15,8 @@ def download_media(video_id, output_filename, is_audio=False):
         'outtmpl': output_filename.replace('.mp3', '') if is_audio else output_filename,
         'quiet': False,
         'no_warnings': True,
+        # THE FIX: Disguise the scraper to bypass the Android VR bot-blocker
+        'extractor_args': {'youtube': {'player_client': ['ios', 'web']}}
     }
     
     if is_audio:
@@ -31,12 +33,53 @@ def download_media(video_id, output_filename, is_audio=False):
             
         if os.path.exists(output_filename):
             print(f"✅ Native download complete!", flush=True)
+            return
         else:
             raise Exception("File not found after download.")
             
     except Exception as e:
         print(f"🚨 yt-dlp failed: {e}", flush=True)
-        sys.exit(1)
+        print(f"⚠️ Native download blocked by YouTube IP filters. Engaging API fallback...", flush=True)
+
+    # --- FALLBACK: Cobalt API ---
+    yt_url = f"https://www.youtube.com/watch?v={video_id}"
+    instances = ["https://api.cobalt.tools", "https://api.cobalt.my.id", "https://cobalt.mrcyjanek.net"]
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    
+    for base_url in instances:
+        try:
+            payload = {
+                "url": yt_url,
+                "downloadMode": "audio" if is_audio else "auto",
+            }
+            if is_audio:
+                payload["audioFormat"] = "mp3"
+            else:
+                payload["videoQuality"] = "1080"
+                
+            response = requests.post(f"{base_url}/", json=payload, headers=headers, timeout=15)
+            if response.status_code != 200:
+                continue
+                
+            download_url = response.json().get("url")
+            if not download_url:
+                continue
+                
+            stream_response = requests.get(download_url, stream=True, timeout=30)
+            with open(output_filename, 'wb') as f:
+                for chunk in stream_response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            if os.path.getsize(output_filename) > 100000:
+                print(f"✅ Fallback download successful!", flush=True)
+                return
+                
+        except Exception:
+            continue
+            
+    print("🚨 All download methods failed. YouTube is severely rate-limiting this server.", flush=True)
+    sys.exit(1)
 
 def main():
     channel_id = os.environ.get("YT_CHANNEL_ID")
