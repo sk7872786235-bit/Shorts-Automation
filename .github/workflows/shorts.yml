@@ -30,6 +30,7 @@ jobs:
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
         run: python -u run.py
 
       - name: Save Processed Videos Ledger
