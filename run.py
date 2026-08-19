@@ -1,13 +1,11 @@
 import os, sys, json, feedparser, subprocess, requests, time
-from google import genai
+import google.generativeai as genai
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
 
 def download_via_invidious(video_id, output_filename, is_audio=False):
     """Uses decentralized Invidious servers to proxy the download, bypassing GitHub IP blocks for free."""
-    
-    # A list of reliable, public Invidious instances
     instances = [
         "https://vid.puffyan.us",
         "https://invidious.protokolla.fi",
@@ -15,17 +13,14 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
         "https://invidious.incogniweb.net"
     ]
     
-    # YouTube itags: 140 = Audio Only (m4a), 22 = 720p Video+Audio (mp4), 18 = 360p Video+Audio (mp4)
     itag = "140" if is_audio else "22"
     
     for instance in instances:
         print(f"Trying decentralized proxy: {instance}...", flush=True)
         try:
-            # &local=true forces the Invidious server to download it and pass it to us (hides our IP)
             url = f"{instance}/latest_version?id={video_id}&itag={itag}&local=true"
             response = requests.get(url, stream=True, timeout=20)
             
-            # If 720p video isn't available, gracefully fall back to 360p
             if response.status_code == 404 and not is_audio:
                 print("720p not found, falling back to 360p...", flush=True)
                 url = f"{instance}/latest_version?id={video_id}&itag=18&local=true"
@@ -37,7 +32,7 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
                         if chunk:
                             f.write(chunk)
                 print(f"✅ Successfully downloaded to {output_filename}!", flush=True)
-                return # Success! Exit the download loop
+                return 
             else:
                 print(f"❌ Server returned status {response.status_code}. Trying next...", flush=True)
                 
@@ -49,7 +44,6 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
     sys.exit(1)
 
 def main():
-    # 1. Fetch Latest Video from RSS
     channel_id = os.environ.get("YT_CHANNEL_ID")
     feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     feed = feedparser.parse(feed_url)
@@ -58,7 +52,6 @@ def main():
         print("No videos found on channel.", flush=True)
         sys.exit(0)
 
-    # 2. Check processed state
     if not os.path.exists("processed.txt"):
         open("processed.txt", "w").close()
 
@@ -80,15 +73,24 @@ def main():
 
     print(f"Processing Kids Video: {video_title} ({video_id})", flush=True)
 
-    # 3. Download AUDIO ONLY using Invidious
+    # 1. Download AUDIO
     print("\n--- FETCHING AUDIO ---", flush=True)
     download_via_invidious(video_id, "audio.m4a", is_audio=True)
 
-    # 4. Upload Audio to Gemini 1.5 Flash
+    # 2. Upload Audio to Gemini 1.5 Flash
     print("\n--- AI ANALYSIS ---", flush=True)
-    print("Uploading audio to Gemini for timestamp extraction...", flush=True)
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    audio_file = client.files.upload(file="audio.m4a")
+    print("Uploading audio to Gemini...", flush=True)
+    
+    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+    audio_file = genai.upload_file("audio.m4a")
+    
+    # Wait for Google's servers to process the audio file
+    print("Waiting for Gemini to process the audio track...", flush=True)
+    while audio_file.state.name == "PROCESSING":
+        print(".", end="", flush=True)
+        time.sleep(2)
+        audio_file = genai.get_file(audio_file.name)
+    print("\nAudio ready!", flush=True)
     
     prompt = """
     Listen to this audio track from a kids' YouTube video. 
@@ -97,13 +99,9 @@ def main():
     Example: {"start": 12, "end": 45}
     """
     
-    print("Analyzing audio (this takes ~10 seconds)...", flush=True)
-    time.sleep(10) # Give Google's servers a moment to process the uploaded file
-    
-    response = client.models.generate_content(
-        model="gemini-1.5-flash",
-        contents=[audio_file, prompt]
-    )
+    print("Analyzing audio to find the best viral hook...", flush=True)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    response = model.generate_content([audio_file, prompt])
     
     clean_json = response.text.strip().replace("```json", "").replace("```", "")
     timestamps = json.loads(clean_json)
@@ -112,17 +110,17 @@ def main():
     duration = int(timestamps["end"]) - start
     print(f"🎯 Gemini selected: Start {start}s, Duration {duration}s", flush=True)
 
-    # 5. Download the FULL video using Invidious
+    # 3. Download the FULL video
     print("\n--- FETCHING VIDEO ---", flush=True)
     download_via_invidious(video_id, "full_video.mp4", is_audio=False)
 
-    # 6. Crop to 9:16 vertical using FFmpeg based on Gemini's timestamps
+    # 4. Crop to 9:16 vertical
     print("\n--- CROPPING VIDEO ---", flush=True)
     print(f"Cropping to 9:16 vertical...", flush=True)
     crop_cmd = f'ffmpeg -ss {start} -i full_video.mp4 -t {duration} -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -c:v libx264 -preset fast -crf 22 -c:a aac output.mp4 -y'
     subprocess.run(crop_cmd, shell=True, check=True)
 
-    # 7. Upload to YouTube Shorts (Kids Compliant)
+    # 5. Upload to YouTube Shorts
     print("\n--- UPLOADING SHORT ---", flush=True)
     creds = Credentials(
         None,
@@ -141,7 +139,7 @@ def main():
         },
         "status": {
             "privacyStatus": "public",
-            "selfDeclaredMadeForKids": True # COPPA COMPLIANT
+            "selfDeclaredMadeForKids": True
         }
     }
     
@@ -153,12 +151,11 @@ def main():
 
     print("✅ Upload complete!", flush=True)
 
-    # 8. Clean up and Save State
     with open("processed.txt", "a") as f:
         f.write(f"{video_id}\n")
 
     try:
-        client.files.delete(name=audio_file.name)
+        genai.delete_file(audio_file.name)
     except:
         pass
 
