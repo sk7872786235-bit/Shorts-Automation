@@ -6,30 +6,39 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
 
 def download_via_invidious(video_id, output_filename, is_audio=False):
-    """Uses decentralized Invidious servers to proxy the download, bypassing GitHub IP blocks for free."""
-    instances = [
-        "https://vid.puffyan.us",
-        "https://invidious.protokolla.fi",
-        "https://inv.tux.pizza",
-        "https://invidious.incogniweb.net",
-        "https://invidious.nerdvpn.de",
-        "https://invidious.lunar.icu",
-        "https://invidious.slipfox.xyz",
-        "https://invidious.weblibre.org"
-    ]
+    """Uses a dynamically updated list of global decentralized proxy servers to bypass GitHub IP blocks."""
     
+    print("Fetching fresh list of healthy Invidious proxies...", flush=True)
+    try:
+        # Fetch the official master list of all live servers globally
+        r = requests.get("https://api.invidious.io/instances.json", timeout=10)
+        data = r.json()
+        # Filter for live HTTPS instances that support APIs
+        instances = [item[1]["uri"] for item in data if item[1].get("type") == "https" and item[1].get("api") == True]
+        print(f"Found {len(instances)} active proxy servers globally!", flush=True)
+    except Exception as e:
+        print(f"Failed to fetch dynamic list, using fallbacks: {e}", flush=True)
+        instances = [
+            "https://vid.puffyan.us",
+            "https://invidious.protokolla.fi",
+            "https://inv.tux.pizza",
+            "https://invidious.incogniweb.net"
+        ]
+        
     itag = "140" if is_audio else "22"
     
     for instance in instances:
         print(f"Trying decentralized proxy: {instance}...", flush=True)
         try:
             url = f"{instance}/latest_version?id={video_id}&itag={itag}&local=true"
-            response = requests.get(url, stream=True, timeout=20)
+            
+            # Increased timeout to 30 seconds to give slower global nodes a chance to connect
+            response = requests.get(url, stream=True, timeout=30)
             
             if response.status_code == 404 and not is_audio:
                 print("720p not found, falling back to 360p...", flush=True)
                 url = f"{instance}/latest_version?id={video_id}&itag=18&local=true"
-                response = requests.get(url, stream=True, timeout=20)
+                response = requests.get(url, stream=True, timeout=30)
                 
             if response.status_code == 200:
                 # SAFETY CHECK 1: Ensure the server isn't sending us an HTML error page in disguise
@@ -43,7 +52,7 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
                         if chunk:
                             f.write(chunk)
                             
-                # SAFETY CHECK 2: Ensure the file isn't corrupted or empty (less than 100KB)
+                # SAFETY CHECK 2: Ensure the file isn't corrupted or suspiciously small (less than 100KB)
                 if os.path.getsize(output_filename) < 100000:
                     print("❌ Downloaded file is corrupt or suspiciously small. Trying next...", flush=True)
                     continue
@@ -54,7 +63,7 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
                 print(f"❌ Server returned status {response.status_code}. Trying next...", flush=True)
                 
         except Exception as e:
-            print(f"❌ Server timeout or error: {e}. Trying next...", flush=True)
+            print(f"❌ Server timeout or connection error. Trying next...", flush=True)
             continue
             
     print("🚨 All free proxies failed. Waiting for next cron schedule to retry.", flush=True)
@@ -138,7 +147,6 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # Packaged safely with explicit keyword arguments to avoid the Python syntax crash
     audio_part = types.Part.from_uri(
         file_uri=audio_file.uri, 
         mime_type="audio/mp4"
