@@ -1,107 +1,42 @@
-import os, sys, json, subprocess, requests, time
+import os, sys, json, subprocess, time
+import yt_dlp
 from google import genai
 from google.genai import types
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
 
-def download_via_cobalt(video_id, output_filename, is_audio=False):
-    """Uses the highly advanced Cobalt API network to proxy downloads, bypassing YouTube IP blocks."""
-    yt_url = f"https://www.youtube.com/watch?v={video_id}"
-    print("Fetching fresh list of Cobalt proxies...", flush=True)
+def download_media(video_id, output_filename, is_audio=False):
+    """Downloads media natively using the enterprise standard yt-dlp."""
+    print(f"Downloading via yt-dlp...", flush=True)
     
-    instances = [
-        "https://api.cobalt.tools",
-        "https://api.cobalt.my.id",
-        "https://cobalt-api.kwiatechu.com",
-        "https://co.eepy.today",
-        "https://cobalt.mrcyjanek.net",
-        "https://cobalt.c.rest",
-        "https://api.only-dank.com",
-    ]
-    
-    try:
-        r = requests.get("https://instances.hyper.lol/instances.json", timeout=10)
-        data = r.json()
-        dynamic_instances = [inst["api_url"] for inst in data if inst.get("api_online") and inst.get("trust_status") == "trusted"]
-        if dynamic_instances:
-            instances = dynamic_instances + instances
-    except Exception as e:
-        print(f"Failed to fetch dynamic list, relying on hardcoded fallbacks: {e}", flush=True)
-
-    seen = set()
-    instances = [x for x in instances if not (x in seen or seen.add(x))]
-
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    ydl_opts = {
+        'format': 'bestaudio/best' if is_audio else 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': output_filename.replace('.mp3', '') if is_audio else output_filename,
+        'quiet': False,
+        'no_warnings': True,
     }
     
-    for instance in instances:
-        print(f"Trying Cobalt API proxy: {instance}...", flush=True)
-        try:
-            base_url = instance.rstrip("/")
+    if is_audio:
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+        }]
+    else:
+        ydl_opts['merge_output_format'] = 'mp4'
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
             
-            payload_v7 = {
-                "url": yt_url,
-                "downloadMode": "audio" if is_audio else "auto",
-            }
-            if is_audio:
-                payload_v7["audioFormat"] = "mp3"
-            else:
-                payload_v7["videoQuality"] = "1080"
-                
-            payload_v6 = {
-                "url": yt_url,
-                "isAudioOnly": is_audio,
-                "aFormat": "mp3" if is_audio else "best",
-                "vQuality": "1080"
-            }
+        if os.path.exists(output_filename):
+            print(f"✅ Native download complete!", flush=True)
+        else:
+            raise Exception("File not found after download.")
             
-            response = requests.post(f"{base_url}/", json=payload_v7, headers=headers, timeout=15)
-            
-            if response.status_code == 404 or response.status_code == 405:
-                response = requests.post(f"{base_url}/api/json", json=payload_v6, headers=headers, timeout=15)
-                
-            if response.status_code != 200:
-                print(f"❌ Server returned {response.status_code}. Trying next...", flush=True)
-                continue
-                
-            data = response.json()
-            if data.get("status") == "error":
-                print(f"❌ API Error: {data.get('text', data.get('error', 'Unknown Error'))}. Trying next...", flush=True)
-                continue
-                
-            download_url = data.get("url")
-            if not download_url:
-                print("❌ No download URL found in response. Trying next...", flush=True)
-                continue
-                
-            print(f"Connecting to proxy stream...", flush=True)
-            stream_response = requests.get(download_url, stream=True, timeout=30)
-            
-            if stream_response.status_code == 200:
-                with open(output_filename, 'wb') as f:
-                    for chunk in stream_response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            
-                if os.path.getsize(output_filename) < 100000:
-                    print("❌ Downloaded file is suspiciously small. Trying next...", flush=True)
-                    continue
-                    
-                print(f"✅ Successfully downloaded to {output_filename}!", flush=True)
-                return 
-            else:
-                print(f"❌ Stream proxy returned {stream_response.status_code}. Trying next...", flush=True)
-                
-        except Exception as e:
-            print(f"❌ Connection error: {e}. Trying next...", flush=True)
-            continue
-            
-    print("🚨 All Cobalt proxies failed. Waiting for next cron schedule to retry.", flush=True)
-    sys.exit(1)
+    except Exception as e:
+        print(f"🚨 yt-dlp failed: {e}", flush=True)
+        sys.exit(1)
 
 def main():
     channel_id = os.environ.get("YT_CHANNEL_ID")
@@ -112,7 +47,6 @@ def main():
         
     print("Authenticating with YouTube API...", flush=True)
     
-    # 1. Authenticate with YouTube API FIRST to bypass public RSS blocks
     creds = Credentials(
         None,
         refresh_token=os.environ["YT_REFRESH_TOKEN"].strip(),
@@ -165,9 +99,9 @@ def main():
 
     print(f"Processing Kids Video: {video_title} ({video_id})", flush=True)
 
-    # 1. Download AUDIO via Cobalt
+    # 1. Download AUDIO natively via yt-dlp
     print("\n--- FETCHING AUDIO ---", flush=True)
-    download_via_cobalt(video_id, "audio.mp3", is_audio=True)
+    download_media(video_id, "audio.mp3", is_audio=True)
 
     # 2. Upload Audio to Gemini
     print("\n--- AI ANALYSIS ---", flush=True)
@@ -225,9 +159,9 @@ def main():
     duration = int(timestamps["end"]) - start
     print(f"🎯 Gemini selected: Start {start}s, Duration {duration}s", flush=True)
 
-    # 3. Download the FULL video
+    # 3. Download the FULL video natively via yt-dlp
     print("\n--- FETCHING VIDEO ---", flush=True)
-    download_via_cobalt(video_id, "full_video.mp4", is_audio=False)
+    download_media(video_id, "full_video.mp4", is_audio=False)
 
     # 4. Crop to 9:16 vertical
     print("\n--- CROPPING VIDEO ---", flush=True)
