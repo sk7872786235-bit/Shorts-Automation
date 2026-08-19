@@ -245,7 +245,6 @@ def download_segment_via_pytubefix(video_url, start_sec, duration, output_path):
     """Downloads segment using pytubefix with multi-client fallbacks (ANDROID, IOS, MWEB, TV)."""
     try:
         from pytubefix import YouTube
-        # Android & iOS clients in pytubefix do NOT require Web PoToken challenges
         clients_to_try = ['ANDROID', 'IOS', 'MWEB', 'ANDROID_VR', 'WEB']
         for client_name in clients_to_try:
             try:
