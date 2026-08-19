@@ -1,8 +1,8 @@
-name: Automated YouTube Shorts Publisher
+name: 🎬 YouTube Shorts AI Automation Bot
 
 on:
   schedule:
-    # Runs automatically every 1 hour (at minute 0) - Zero Quota with YT_COOKIES!
+    # Runs every hour (configurable)
     - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
@@ -46,7 +46,13 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # ⚡ Instant FFmpeg setup (Reduces 15 mins to ~1 second)
+      # 🟢 Setup Node.js runtime (Allows pytubefix & yt-dlp to auto-generate PoToken / BotGuard tokens)
+      - name: 🟢 Set up Node.js for PoToken Generator
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 🎬 Instant FFmpeg (Pre-installed on GitHub Runners)
       - name: 🎬 Set up FFmpeg (Instant)
         uses: FedericoCarboni/setup-ffmpeg@v3
         with:
