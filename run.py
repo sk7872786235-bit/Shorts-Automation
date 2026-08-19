@@ -10,19 +10,36 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
     
     print("Fetching fresh list of healthy Invidious proxies...", flush=True)
     try:
-        # Fetch the official master list of all live servers globally
         r = requests.get("https://api.invidious.io/instances.json", timeout=10)
         data = r.json()
-        # Filter for live HTTPS instances that support APIs
-        instances = [item[1]["uri"] for item in data if item[1].get("type") == "https" and item[1].get("api") == True]
+        
+        # Simplified filter: just grab any HTTPS instance
+        instances = [item[1]["uri"] for item in data if item[1].get("type") == "https"]
+        
+        # THE FIX: If the API returns 0 for any reason, force the fallback
+        if len(instances) == 0:
+            raise ValueError("API returned 0 active instances.")
+            
         print(f"Found {len(instances)} active proxy servers globally!", flush=True)
+        
     except Exception as e:
-        print(f"Failed to fetch dynamic list, using fallbacks: {e}", flush=True)
+        print(f"Failed to fetch dynamic list, using massive fallback list: {e}", flush=True)
         instances = [
             "https://vid.puffyan.us",
             "https://invidious.protokolla.fi",
             "https://inv.tux.pizza",
-            "https://invidious.incogniweb.net"
+            "https://invidious.incogniweb.net",
+            "https://invidious.nerdvpn.de",
+            "https://invidious.lunar.icu",
+            "https://invidious.slipfox.xyz",
+            "https://invidious.weblibre.org",
+            "https://inv.nadeko.net",
+            "https://invidious.perennialte.ch",
+            "https://invidious.flokinet.to",
+            "https://invidious.private.coffee",
+            "https://invidious.peertube.biz",
+            "https://yt.cdaut.de",
+            "https://invidious.privacyredirect.com"
         ]
         
     itag = "140" if is_audio else "22"
@@ -31,8 +48,6 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
         print(f"Trying decentralized proxy: {instance}...", flush=True)
         try:
             url = f"{instance}/latest_version?id={video_id}&itag={itag}&local=true"
-            
-            # Increased timeout to 30 seconds to give slower global nodes a chance to connect
             response = requests.get(url, stream=True, timeout=30)
             
             if response.status_code == 404 and not is_audio:
@@ -41,7 +56,6 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
                 response = requests.get(url, stream=True, timeout=30)
                 
             if response.status_code == 200:
-                # SAFETY CHECK 1: Ensure the server isn't sending us an HTML error page in disguise
                 content_type = response.headers.get('Content-Type', '').lower()
                 if 'text/html' in content_type or 'application/json' in content_type:
                     print("❌ Proxy returned a web page instead of a media file. Trying next...", flush=True)
@@ -52,7 +66,6 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
                         if chunk:
                             f.write(chunk)
                             
-                # SAFETY CHECK 2: Ensure the file isn't corrupted or suspiciously small (less than 100KB)
                 if os.path.getsize(output_filename) < 100000:
                     print("❌ Downloaded file is corrupt or suspiciously small. Trying next...", flush=True)
                     continue
@@ -107,9 +120,9 @@ def main():
 
     print(f"Processing Kids Video: {video_title} ({video_id})", flush=True)
 
-    # 1. Download AUDIO natively as M4A
+    # 1. Download AUDIO natively as M4A (saved as MP4 to bypass Linux metadata quirks)
     print("\n--- FETCHING AUDIO ---", flush=True)
-    download_via_invidious(video_id, "audio.m4a", is_audio=True)
+    download_via_invidious(video_id, "audio.mp4", is_audio=True)
 
     # 2. Upload Audio to Gemini
     print("\n--- AI ANALYSIS ---", flush=True)
@@ -119,7 +132,7 @@ def main():
     client = genai.Client(api_key=api_key)
     
     audio_file = client.files.upload(
-        file="audio.m4a", 
+        file="audio.mp4", 
         config={'mime_type': 'audio/mp4'}
     )
     
