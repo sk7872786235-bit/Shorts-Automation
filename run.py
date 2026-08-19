@@ -84,7 +84,6 @@ def main():
     
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"].strip())
     
-    # FORCE the mime_type so the raw Linux server doesn't upload it as generic binary data
     audio_file = client.files.upload(
         file="audio.m4a", 
         config={'mime_type': 'audio/mp4'}
@@ -109,15 +108,24 @@ def main():
     prompt = """
     Listen to this audio track from a kids' YouTube video. 
     Find the most engaging, catchy 30 to 50 second segment (like the chorus of a song).
-    Return ONLY a valid JSON object with the exact start and end time in seconds. No formatting, no markdown blocks.
+    Return ONLY a valid JSON object with the exact start and end time in seconds. No formatting.
     Example: {"start": 12, "end": 45}
     """
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
+    # THE FIX: Explicitly wrap the file so the SDK doesn't mistake it for a function
+    audio_part = types.Part.from_uri(
+        file_uri=audio_file.uri,
+        mime_type="audio/mp4"
+    )
+    
     response = client.models.generate_content(
         model="gemini-3.6-flash",
-        contents=[audio_file, prompt]
+        contents=[audio_part, prompt],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+        )
     )
     
     clean_json = response.text.strip().replace("```json", "").replace("```", "")
