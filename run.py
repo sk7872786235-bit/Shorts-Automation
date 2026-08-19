@@ -5,81 +5,83 @@ from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
 
-def download_via_invidious(video_id, output_filename, is_audio=False):
-    """Uses a dynamically updated list of global decentralized proxy servers to bypass GitHub IP blocks."""
-    
-    print("Fetching fresh list of healthy Invidious proxies...", flush=True)
-    try:
-        r = requests.get("https://api.invidious.io/instances.json", timeout=10)
-        data = r.json()
-        
-        # Simplified filter: just grab any HTTPS instance
-        instances = [item[1]["uri"] for item in data if item[1].get("type") == "https"]
-        
-        # THE FIX: If the API returns 0 for any reason, force the fallback
-        if len(instances) == 0:
-            raise ValueError("API returned 0 active instances.")
-            
-        print(f"Found {len(instances)} active proxy servers globally!", flush=True)
-        
-    except Exception as e:
-        print(f"Failed to fetch dynamic list, using massive fallback list: {e}", flush=True)
-        instances = [
-            "https://vid.puffyan.us",
-            "https://invidious.protokolla.fi",
-            "https://inv.tux.pizza",
-            "https://invidious.incogniweb.net",
-            "https://invidious.nerdvpn.de",
-            "https://invidious.lunar.icu",
-            "https://invidious.slipfox.xyz",
-            "https://invidious.weblibre.org",
-            "https://inv.nadeko.net",
-            "https://invidious.perennialte.ch",
-            "https://invidious.flokinet.to",
-            "https://invidious.private.coffee",
-            "https://invidious.peertube.biz",
-            "https://yt.cdaut.de",
-            "https://invidious.privacyredirect.com"
-        ]
-        
-    itag = "140" if is_audio else "22"
+def download_via_piped(video_id, output_filename, is_audio=False):
+    """Uses the highly resilient Piped API network to proxy downloads, bypassing YouTube blocks."""
+    instances = [
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.tokhmi.xyz",
+        "https://pipedapi.syncpundit.io",
+        "https://piapi.ggtyler.dev",
+        "https://pipedapi.smnz.de",
+        "https://piped-api.lunar.icu"
+    ]
     
     for instance in instances:
-        print(f"Trying decentralized proxy: {instance}...", flush=True)
+        print(f"Trying Piped API proxy: {instance}...", flush=True)
         try:
-            url = f"{instance}/latest_version?id={video_id}&itag={itag}&local=true"
-            response = requests.get(url, stream=True, timeout=30)
+            url = f"{instance}/streams/{video_id}"
+            response = requests.get(url, timeout=15)
             
-            if response.status_code == 404 and not is_audio:
-                print("720p not found, falling back to 360p...", flush=True)
-                url = f"{instance}/latest_version?id={video_id}&itag=18&local=true"
-                response = requests.get(url, stream=True, timeout=30)
+            if response.status_code != 200:
+                print(f"❌ Server returned {response.status_code}. Trying next...", flush=True)
+                continue
                 
-            if response.status_code == 200:
-                content_type = response.headers.get('Content-Type', '').lower()
-                if 'text/html' in content_type or 'application/json' in content_type:
-                    print("❌ Proxy returned a web page instead of a media file. Trying next...", flush=True)
-                    continue
-                    
+            data = response.json()
+            if "error" in data:
+                print(f"❌ API returned error: {data['error']}. Trying next...", flush=True)
+                continue
+                
+            download_url = None
+            if is_audio:
+                # Target the highest quality M4A audio stream
+                for stream in data.get("audioStreams", []):
+                    if stream.get("format") == "M4A":
+                        download_url = stream.get("url")
+                        break
+                # Fallback to the first available audio track if M4A is missing
+                if not download_url and data.get("audioStreams"):
+                    download_url = data["audioStreams"][0].get("url")
+            else:
+                # Target a combined Video+Audio stream (MPEG_4 / MP4)
+                for stream in data.get("videoStreams", []):
+                    if not stream.get("videoOnly") and stream.get("format") == "MPEG_4":
+                        download_url = stream.get("url")
+                        break
+                # Fallback if no combined MPEG_4 is found
+                if not download_url:
+                    for stream in data.get("videoStreams", []):
+                        if not stream.get("videoOnly"):
+                            download_url = stream.get("url")
+                            break
+                            
+            if not download_url:
+                print("❌ No compatible stream found on this instance. Trying next...", flush=True)
+                continue
+                
+            print(f"Connecting to proxy stream...", flush=True)
+            stream_response = requests.get(download_url, stream=True, timeout=30)
+            
+            if stream_response.status_code == 200:
                 with open(output_filename, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
+                    for chunk in stream_response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
                             
+                # Safety check against corrupted or empty files
                 if os.path.getsize(output_filename) < 100000:
-                    print("❌ Downloaded file is corrupt or suspiciously small. Trying next...", flush=True)
+                    print("❌ Downloaded file is suspiciously small. Trying next...", flush=True)
                     continue
                     
                 print(f"✅ Successfully downloaded to {output_filename}!", flush=True)
                 return 
             else:
-                print(f"❌ Server returned status {response.status_code}. Trying next...", flush=True)
+                print(f"❌ Stream proxy returned {stream_response.status_code}. Trying next...", flush=True)
                 
         except Exception as e:
-            print(f"❌ Server timeout or connection error. Trying next...", flush=True)
+            print(f"❌ Connection error: {e}. Trying next...", flush=True)
             continue
             
-    print("🚨 All free proxies failed. Waiting for next cron schedule to retry.", flush=True)
+    print("🚨 All Piped proxies failed. YouTube might be blocking datacenters. Waiting for retry.", flush=True)
     sys.exit(1)
 
 def main():
@@ -122,7 +124,7 @@ def main():
 
     # 1. Download AUDIO natively as M4A (saved as MP4 to bypass Linux metadata quirks)
     print("\n--- FETCHING AUDIO ---", flush=True)
-    download_via_invidious(video_id, "audio.mp4", is_audio=True)
+    download_via_piped(video_id, "audio.mp4", is_audio=True)
 
     # 2. Upload Audio to Gemini
     print("\n--- AI ANALYSIS ---", flush=True)
@@ -182,7 +184,7 @@ def main():
 
     # 3. Download the FULL video
     print("\n--- FETCHING VIDEO ---", flush=True)
-    download_via_invidious(video_id, "full_video.mp4", is_audio=False)
+    download_via_piped(video_id, "full_video.mp4", is_audio=False)
 
     # 4. Crop to 9:16 vertical
     print("\n--- CROPPING VIDEO ---", flush=True)
