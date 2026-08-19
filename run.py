@@ -1,5 +1,6 @@
 import os, sys, json, feedparser, subprocess, requests, time
 from google import genai
+from google.genai import types
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
@@ -77,16 +78,34 @@ def main():
     print("\n--- FETCHING AUDIO ---", flush=True)
     download_via_invidious(video_id, "audio.m4a", is_audio=True)
 
-    # 2. Upload Audio to Gemini 3.6 Flash
+    # 2. Upload Audio to Gemini
     print("\n--- AI ANALYSIS ---", flush=True)
     print("Uploading audio to Gemini...", flush=True)
     
-    # .strip() removes any accidental hidden spaces or newlines in the GitHub Secret
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"].strip())
-    audio_file = client.files.upload(file="audio.m4a")
+    
+    # FORCE the mime_type so the raw Linux server doesn't upload it as generic binary data
+    audio_file = client.files.upload(
+        file="audio.m4a", 
+        config={'mime_type': 'audio/mp4'}
+    )
     
     print("Waiting for Google's servers to process the audio track...", flush=True)
-    time.sleep(15) 
+    
+    # Active polling loop to ensure the file is completely ready before asking questions
+    while True:
+        audio_file = client.files.get(name=audio_file.name)
+        state_str = str(getattr(audio_file, 'state', ''))
+        
+        if "PROCESSING" in state_str:
+            print(".", end="", flush=True)
+            time.sleep(3)
+        elif "FAILED" in state_str:
+            print("\n❌ Gemini failed to process the audio file.", flush=True)
+            sys.exit(1)
+        else:
+            print("\n✅ Audio ready!", flush=True)
+            break
     
     prompt = """
     Listen to this audio track from a kids' YouTube video. 
@@ -97,10 +116,13 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # Updated to gemini-3.6-flash
+    # Force pure JSON output to prevent AFC warnings and formatting bugs
     response = client.models.generate_content(
         model="gemini-3.6-flash",
-        contents=[audio_file, prompt]
+        contents=[audio_file, prompt],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+        )
     )
     
     clean_json = response.text.strip().replace("```json", "").replace("```", "")
