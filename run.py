@@ -4,7 +4,7 @@ YouTube Shorts Automation Engine (run.py)
 =========================================
 Features:
 1. Zero-Quota Cookie Upload Protocol (YT_COOKIES) with automatic fallback to OAuth API.
-2. Robust 3-strategy video segment downloader (Android/iOS spoofing bypassing IP & cookie blocks).
+2. Robust 4-strategy video segment downloader (tv_embedded & web_embedded bypasses datacenter IP bot challenges).
 3. Anti-duplication state engine (history.json) preventing repeated clips.
 4. Gemini AI viral moment detector (30-55s intervals with high-CTR titles).
 5. High-quality 1080x1920 9:16 vertical video rendering with blurred ambient padding.
@@ -113,7 +113,7 @@ def fetch_channel_videos(channel_id, access_token=None, max_results=15):
     try:
         cmd = [
             "yt-dlp",
-            "--extractor-args", "youtube:player_client=android,ios,web",
+            "--extractor-args", "youtube:player_client=tv_embedded,web_embedded,mweb",
             "--flat-playlist",
             "--print", "%(id)s\t%(title)s\t%(duration)s\t%(upload_date)s",
             f"https://www.youtube.com/channel/{channel_id}/videos",
@@ -249,11 +249,11 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
     duration = end_sec - start_sec
     log(f"Downloading clip segment ({start_sec}s to {end_sec}s, duration: {duration}s)...", "FFMPEG")
 
-    # Clean direct extraction with Android/iOS client spoofing (does not rely on expired browser cookies)
-    log("Strategy 1: Attempting direct section stream extraction...", "INFO")
+    # Strategy 1: tv_embedded & web_embedded (Bypasses datacenter IP bot detection!)
+    log("Strategy 1: Attempting tv_embedded & web_embedded stream extraction...", "INFO")
     cmd_strat1 = [
         "yt-dlp",
-        "--extractor-args", "youtube:player_client=android,ios,web",
+        "--extractor-args", "youtube:player_client=tv_embedded,web_embedded,mweb",
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
         "--download-sections", f"*{start_sec}-{end_sec}",
         "--force-keyframes-at-cuts",
@@ -263,11 +263,12 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
     ]
     res1 = subprocess.run(cmd_strat1, capture_output=True, text=True)
     
+    # Strategy 2: If Strategy 1 failed, direct HTTP range streaming into FFmpeg
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Strategy 1 notice. Trying Strategy 2 (FFmpeg direct HTTP range stream)...", "WARN")
+        log("Strategy 1 notice. Trying Strategy 2 (FFmpeg direct HTTP range stream via tv_embedded)...", "WARN")
         cmd_strat2 = [
             "yt-dlp",
-            "--extractor-args", "youtube:player_client=android,ios",
+            "--extractor-args", "youtube:player_client=tv_embedded,web_embedded",
             "-g",
             video_url
         ]
@@ -291,12 +292,13 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
             ]
             subprocess.run(ffmpeg_stream_cmd, capture_output=True)
 
+    # Strategy 3: Single stream fallback via tv client
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Strategy 2 notice. Trying Strategy 3 (Standard single stream fallback)...", "WARN")
+        log("Trying Strategy 3 (tv client single stream)...", "WARN")
         cmd_strat3 = [
             "yt-dlp",
-            "--extractor-args", "youtube:player_client=android,web",
-            "-f", "18/22/best",
+            "--extractor-args", "youtube:player_client=tv",
+            "-f", "best",
             "--download-sections", f"*{start_sec}-{end_sec}",
             "-o", raw_clip_path,
             video_url
