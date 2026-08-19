@@ -20,9 +20,9 @@ jobs:
       - name: Install FFmpeg
         uses: FedericoCarboni/setup-ffmpeg@v3
         
-      - name: Install Python Dependencies
+      - name: Install Python Dependencies & Plugins
         run: |
-          pip install yt-dlp youtube-transcript-api==0.6.3 google-genai google-api-python-client google-auth feedparser
+          pip install yt-dlp yt-dlp-youtube-oauth2 google-genai google-api-python-client google-auth feedparser
           
       - name: Run Automation Script
         env:
@@ -31,7 +31,6 @@ jobs:
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
-          YT_COOKIES: ${{ secrets.YT_COOKIES }}
           PYTHONUNBUFFERED: "1"
         run: python -u run.py
         
