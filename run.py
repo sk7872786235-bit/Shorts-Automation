@@ -77,7 +77,7 @@ def main():
     print("\n--- FETCHING AUDIO ---", flush=True)
     download_via_invidious(video_id, "audio.m4a", is_audio=True)
 
-    # 2. Upload Audio to Gemini 2.5 Flash
+    # 2. Upload Audio to Gemini 3.6 Flash
     print("\n--- AI ANALYSIS ---", flush=True)
     print("Uploading audio to Gemini...", flush=True)
     
@@ -97,9 +97,9 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # We must use gemini-2.5-flash here to avoid the 404 error
+    # Updated to gemini-3.6-flash
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=[audio_file, prompt]
     )
     
