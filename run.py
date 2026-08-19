@@ -37,13 +37,13 @@ def main():
 
     print(f"Processing Kids Video: {video_title} ({video_id})", flush=True)
 
-    # Setup yt-dlp to use OAuth2 Plugin to bypass Bot Detection
-    # This acts like a Smart TV logging in, totally bypassing cookies.
-    oauth_param = '--username oauth2 --password ""'
+    # 3. Mobile Spoofing (The Magic Fix)
+    # Pretends to be an iPhone/Android app. Bypasses bot detection without cookies or logins!
+    spoof_param = '--extractor-args "youtube:player_client=ios,android"'
 
-    # 3. Download AUDIO ONLY for Gemini to listen to
+    # Download AUDIO ONLY for Gemini to listen to
     print("Downloading audio track for AI analysis...", flush=True)
-    audio_cmd = f'yt-dlp {oauth_param} -f "bestaudio[ext=m4a]" "{yt_url}" -o "audio.m4a"'
+    audio_cmd = f'yt-dlp {spoof_param} -f "bestaudio[ext=m4a]" "{yt_url}" -o "audio.m4a"'
     subprocess.run(audio_cmd, shell=True, check=True)
 
     # 4. Upload Audio to Gemini 1.5 Flash
@@ -74,7 +74,7 @@ def main():
 
     # 5. Download ONLY that specific video segment & format to 9:16
     print("Downloading that specific video segment...", flush=True)
-    dl_cmd = f'yt-dlp {oauth_param} --download-sections "*{start}-{start+duration}" --force-keyframes-at-cuts -f "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" "{yt_url}" -o "clip.mp4"'
+    dl_cmd = f'yt-dlp {spoof_param} --download-sections "*{start}-{start+duration}" --force-keyframes-at-cuts -f "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" "{yt_url}" -o "clip.mp4"'
     subprocess.run(dl_cmd, shell=True, check=True)
 
     print("Cropping to 9:16 vertical via FFmpeg...", flush=True)
