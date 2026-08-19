@@ -1,73 +1,55 @@
 name: 24/7 Autonomous Shorts Engine
 
 on:
-  workflow_dispatch: # [MANUAL RUN] Click "Run workflow" in GitHub UI
+  workflow_dispatch:
   schedule:
-    - cron: '0 * * * *' # [AUTOMATED] Runs at minute 0 of every hour
+    - cron: '0 * * * *'
 
-concurrency:
-  group: shorts-pipeline
-  cancel-in-progress: false # Never interrupt a rendering job
+permissions: # IMPORTANT: Required to push history.json
+  contents: write
 
 jobs:
   run-shorts-engine:
     runs-on: ubuntu-latest
-    timeout-minutes: 25 # Failsafe to prevent eating free tier minutes if hung
-    
     steps:
-      - name: 1. Checkout Repository
+      - name: 1. Checkout
         uses: actions/checkout@v4
-        with:
-          token: ${{ github.token }} # Needed to push history.json back
 
-      - name: 2. Set up Python 3.10
+      - name: 2. Setup Node.js (Required for yt-dlp JS runtime)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 3. Setup Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
-      - name: 3. Install System Dependencies (FFmpeg)
+      - name: 4. Setup FFmpeg
+        uses: FedericoCarboni/setup-ffmpeg@v3
+
+      - name: 5. Install Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg libass-dev fonts-liberation fonts-dejavu-core
+          pip install yt-dlp faster-whisper google-api-python-client google-auth-oauthlib google-auth
+          sudo apt-get install -y fonts-liberation fonts-dejavu-core
 
-      - name: 4. Install Python Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install yt-dlp faster-whisper google-api-python-client google-auth-oauthlib google-auth httplib2 requests
+      - name: 6. Inject Cookies
+        run: echo "${{ secrets.YT_COOKIES }}" > cookies.txt
 
-      - name: 5. Inject Authentication Cookies
-        env:
-          YT_COOKIES: ${{ secrets.YT_COOKIES }}
-        run: |
-          # Safely handles multiline Netscape cookie formats for yt-dlp
-          echo "$YT_COOKIES" > cookies.txt
-
-      - name: 6. Execute Run.py (Pipeline)
+      - name: 7. Run Pipeline
         env:
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          python run.py --cookies cookies.txt
+        run: python run.py --cookies cookies.txt
 
-      - name: 7. Upload Rendered Video on Failure (Debugging Graph)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: failed-run-artifacts
-          path: |
-            output_shorts/
-            history.json
-            *.log
-          retention-days: 3
-
-      - name: 8. Commit State (history.json)
-        if: always() # Save state even if it crashed halfway
+      - name: 8. Commit History
+        if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add history.json || true
-          git commit -m "chore: update processed clip history [skip ci]" || echo "No state changes to commit"
-          git push || true
+          git add history.json || echo "No history.json to add"
+          git commit -m "update history" || echo "No changes"
+          git push
