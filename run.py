@@ -122,8 +122,11 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # THE FIX: Explicitly package the file using positional arguments and strictly enforce JSON output
-    audio_part = types.Part.from_uri(audio_file.uri, "audio/mp4")
+    # THE FIX: Explicitly name the parameters (file_uri and mime_type) for the SDK
+    audio_part = types.Part.from_uri(
+        file_uri=audio_file.uri, 
+        mime_type="audio/mp4"
+    )
     
     response = client.models.generate_content(
         model="gemini-3.6-flash",
