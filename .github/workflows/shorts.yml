@@ -20,9 +20,10 @@ jobs:
       - name: Install FFmpeg
         uses: FedericoCarboni/setup-ffmpeg@v3
         
-      - name: Install Python Dependencies & Plugins
+      - name: Install Python Dependencies (Nightly yt-dlp)
         run: |
-          pip install yt-dlp yt-dlp-youtube-oauth2 google-genai google-api-python-client google-auth feedparser
+          pip install -U --pre yt-dlp 
+          pip install youtube-transcript-api==0.6.3 google-genai google-api-python-client google-auth feedparser
           
       - name: Run Automation Script
         env:
