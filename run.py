@@ -1,5 +1,6 @@
 import os, sys, json, feedparser, subprocess, requests, time
 from google import genai
+from google.genai import types
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
@@ -83,8 +84,11 @@ def main():
     
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"].strip())
     
-    # We let the SDK natively detect the format without forcing an override
-    audio_file = client.files.upload(file="audio.m4a")
+    # FORCE the mime_type so the raw Linux server doesn't upload it as generic binary data
+    audio_file = client.files.upload(
+        file="audio.m4a", 
+        config={'mime_type': 'audio/mp4'}
+    )
     
     print("Waiting for Google's servers to process the audio track...", flush=True)
     
@@ -111,7 +115,6 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # Removed the strict JSON config argument that was causing the 400 crash
     response = client.models.generate_content(
         model="gemini-3.6-flash",
         contents=[audio_file, prompt]
