@@ -3,12 +3,11 @@
 YouTube Shorts Automation Engine (run.py)
 =========================================
 Features:
-1. Pro Download Engine: Progressive MP4 + Local FFmpeg slice (bypasses PoToken & DASH bot challenges).
-2. Zero-Quota Cookie-Based Upload Protocol (YT_COOKIES): 0 API units consumed.
-3. Auto-fallback to YouTube Data API v3 OAuth if cookies expire.
-4. Strict segment history tracker (history.json) guaranteeing NO duplicate clips.
-5. Gemini AI detection of high-retention 30-55s viral moments with high-CTR titles.
-6. High-quality 1080x1920 9:16 vertical video rendering with blurred ambient padding.
+1. Universal Cookie Sanitizer (JSON arrays, raw strings, and Netscape support).
+2. Real Browser TLS Impersonation via curl_cffi & tv_embedded client rotation.
+3. Zero-Quota Cookie-Based Upload Protocol (YT_COOKIES) with OAuth2 fallback.
+4. Gemini AI detection of high-retention 30-55s viral moments with high-CTR titles.
+5. High-quality 1080x1920 9:16 vertical video rendering with blurred ambient padding.
 """
 
 import os
@@ -22,7 +21,6 @@ import subprocess
 from datetime import datetime, timezone
 import requests
 
-# Constants & Configuration
 HISTORY_FILE = "history.json"
 OUTPUT_DIR = "temp_output"
 MIN_CLIP_DURATION = 30
@@ -237,28 +235,88 @@ Output ONLY valid JSON:
     }
 
 def save_sanitized_cookies(raw_cookie_text, output_path):
-    """Sanitizes Netscape cookies ensuring mandatory headers and base64 handling."""
+    """
+    Universal Cookie Converter:
+    Converts JSON arrays, raw HTTP Header strings (name=val;), Base64, or Netscape files
+    into a strictly formatted, valid Netscape cookie file for yt-dlp.
+    """
     if not raw_cookie_text or not raw_cookie_text.strip():
         return None
     text = raw_cookie_text.strip()
+    
     try:
         import base64
         decoded = base64.b64decode(text).decode('utf-8')
-        if "youtube.com" in decoded or "LOGIN_INFO" in decoded or "SID" in decoded:
-            text = decoded
+        if any(k in decoded for k in ["youtube.com", "LOGIN_INFO", "SID", "name", "value"]):
+            text = decoded.strip()
     except Exception:
         pass
 
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    formatted = ["# Netscape HTTP Cookie File", "# This is a generated cookie file for yt-dlp automation"]
-    for l in lines:
-        if l.startswith("# Netscape") or l.startswith("# http"):
+    netscape_lines = [
+        "# Netscape HTTP Cookie File",
+        "# http://curl.haxx.se/rfc/cookie_spec.html",
+        "# This is a generated cookie file for yt-dlp automation"
+    ]
+
+    # Case A: JSON Cookie Array (from Cookie-Editor / EditThisCookie)
+    if text.startswith("[") or text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                parsed = [parsed]
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict):
+                        domain = item.get("domain", ".youtube.com")
+                        flag = "TRUE" if domain.startswith(".") else "FALSE"
+                        path = item.get("path", "/")
+                        secure = "TRUE" if item.get("secure", True) else "FALSE"
+                        expires = int(item.get("expirationDate", time.time() + 31536000))
+                        name = item.get("name", "")
+                        value = item.get("value", "")
+                        if name:
+                            netscape_lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}")
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                with open(output_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(netscape_lines) + "\n")
+                return output_path
+        except Exception:
+            pass
+
+    # Case B: HTTP Header String (e.g. VISITOR_INFO1_LIVE=xyz; LOGIN_INFO=abc; SID=123)
+    if ";" in text and "\t" not in text:
+        pairs = [p.strip() for p in text.split(";") if "=" in p]
+        if pairs:
+            for pair in pairs:
+                k, v = pair.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if k:
+                    expires = int(time.time() + 31536000)
+                    netscape_lines.append(f".youtube.com\tTRUE\t/\tTRUE\t{expires}\t{k}\t{v}")
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(netscape_lines) + "\n")
+            return output_path
+
+    # Case C: Standard Netscape format lines
+    raw_lines = text.splitlines()
+    for line in raw_lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
             continue
-        formatted.append(l)
+        parts = line.split("\t")
+        if len(parts) < 7:
+            parts = line.split()
+        if len(parts) >= 7:
+            domain, flag, path, secure, expires, name, value = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+            netscape_lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}")
+        elif len(parts) == 2:
+            netscape_lines.append(f".youtube.com\tTRUE\t/\tTRUE\t{int(time.time() + 31536000)}\t{parts[0]}\t{parts[1]}")
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(formatted) + "\n")
+        f.write("\n".join(netscape_lines) + "\n")
     return output_path
 
 def extract_video_id(url_or_id):
@@ -270,9 +328,7 @@ def extract_video_id(url_or_id):
 
 def download_via_ytdlp_python(video_url, start_sec, duration, output_path, cookies_path=None):
     """
-    Pro Strategy 1: Uses yt_dlp Python API directly to fetch single-stream progressive MP4.
-    Bypasses DASH/SABR range-slicing bot challenges by downloading standard format 18/22,
-    then cuts the segment locally with FFmpeg with zero latency.
+    Pro Strategy 1: Uses yt_dlp Python API with TLS Impersonation & Player Client rotation.
     """
     try:
         import yt_dlp
@@ -284,15 +340,18 @@ def download_via_ytdlp_python(video_url, start_sec, duration, output_path, cooki
                 pass
 
         client_configs = [
-            ['android', 'ios'],
-            ['android_creator', 'mweb'],
-            ['web_safari', 'mweb'],
-            ['web', 'mweb']
+            {'player_client': ['tv_embedded', 'web_safari'], 'impersonate': 'chrome'},
+            {'player_client': ['tv', 'mweb'], 'impersonate': None},
+            {'player_client': ['ios', 'mweb'], 'impersonate': 'safari'},
+            {'player_client': ['android', 'ios'], 'impersonate': None},
+            {'player_client': ['web_safari', 'mweb'], 'impersonate': 'chrome'},
         ]
 
-        for clients in client_configs:
+        for cfg in client_configs:
             try:
-                log(f"Attempting yt-dlp Python engine with clients: {clients}...", "INFO")
+                clients = cfg['player_client']
+                impersonate = cfg.get('impersonate')
+                log(f"Attempting yt-dlp with clients: {clients} (TLS Impersonate: {impersonate})...", "INFO")
                 ydl_opts = {
                     'format': '18/22/best[ext=mp4]/best',
                     'outtmpl': full_source,
@@ -305,6 +364,8 @@ def download_via_ytdlp_python(video_url, start_sec, duration, output_path, cooki
                         }
                     }
                 }
+                if impersonate:
+                    ydl_opts['impersonate'] = impersonate
                 if cookies_path and os.path.exists(cookies_path):
                     ydl_opts['cookiefile'] = cookies_path
 
@@ -331,7 +392,7 @@ def download_via_ytdlp_python(video_url, start_sec, duration, output_path, cooki
                             pass
                         return True
             except Exception as ye:
-                log(f"yt-dlp clients {clients} notice: {ye}", "WARN")
+                log(f"yt-dlp {clients} notice: {ye}", "WARN")
                 continue
     except Exception as e:
         log(f"yt-dlp Python API notice: {e}", "WARN")
@@ -349,7 +410,7 @@ def download_via_direct_stream_url(video_url, start_sec, duration, output_path, 
             'no_warnings': True,
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android', 'ios', 'mweb']
+                    'player_client': ['tv_embedded', 'web_safari', 'android']
                 }
             }
         }
@@ -395,10 +456,10 @@ def download_segment_via_gateway(video_id, start_sec, duration, output_path):
             "Accept": "application/json",
             "Content-Type": "application/json"
         }
-        for cob_url in ["https://api.cobalt.tools/api/json", "https://co.wuk.sh/api/json", "https://cobalt.api.karyon.ch/api/json"]:
+        for cob_url in ["https://api.cobalt.tools/", "https://api.cobalt.tools/api/json", "https://co.wuk.sh/api/json"]:
             try:
                 c_resp = requests.post(cob_url, json=cobalt_payload, headers=cobalt_headers, timeout=6)
-                if c_resp.status_code == 200:
+                if c_resp.status_code in (200, 201):
                     c_data = c_resp.json()
                     direct_url = c_data.get("url")
                     if direct_url:
@@ -422,11 +483,12 @@ def download_segment_via_gateway(video_id, start_sec, duration, output_path):
         log(f"Cobalt attempt notice: {e}", "WARN")
 
     gateways = [
-        f"https://pipedapi.kavin.rocks/streams/{video_id}",
-        f"https://api.piped.privacy.com.de/streams/{video_id}",
-        f"https://piped-api.garudalinux.org/streams/{video_id}",
         f"https://inv.tux.pizza/api/v1/videos/{video_id}",
-        f"https://invidious.nerdvpn.de/api/v1/videos/{video_id}"
+        f"https://invidious.nerdvpn.de/api/v1/videos/{video_id}",
+        f"https://invidious.asir.dev/api/v1/videos/{video_id}",
+        f"https://yewtu.be/api/v1/videos/{video_id}",
+        f"https://api.piped.privacy.com.de/streams/{video_id}",
+        f"https://pipedapi.kavin.rocks/streams/{video_id}"
     ]
     
     for gw in gateways:
@@ -438,21 +500,21 @@ def download_segment_via_gateway(video_id, start_sec, duration, output_path):
             data = resp.json()
             stream_url = None
             
-            if "videoStreams" in data and isinstance(data["videoStreams"], list):
-                for stream in data["videoStreams"]:
-                    if stream.get("url") and stream.get("videoOnly") is False:
-                        stream_url = stream["url"]
-                        break
-                if not stream_url and data["videoStreams"]:
-                    stream_url = data["videoStreams"][0].get("url")
-
-            elif "formatStreams" in data and isinstance(data["formatStreams"], list):
+            if "formatStreams" in data and isinstance(data["formatStreams"], list):
                 for stream in reversed(data["formatStreams"]):
                     if stream.get("url") and ("mp4" in stream.get("container", "") or "720" in stream.get("qualityLabel", "") or "1080" in stream.get("qualityLabel", "")):
                         stream_url = stream["url"]
                         break
                 if not stream_url and data["formatStreams"]:
                     stream_url = data["formatStreams"][-1].get("url")
+
+            elif "videoStreams" in data and isinstance(data["videoStreams"], list):
+                for stream in data["videoStreams"]:
+                    if stream.get("url") and stream.get("videoOnly") is False:
+                        stream_url = stream["url"]
+                        break
+                if not stream_url and data["videoStreams"]:
+                    stream_url = data["videoStreams"][0].get("url")
 
             if stream_url:
                 log(f"Direct media stream URL acquired from {gw_host}! Cutting segment via FFmpeg...", "SUCCESS")
@@ -474,7 +536,6 @@ def download_segment_via_gateway(video_id, start_sec, duration, output_path):
     return False
 
 def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_file=None):
-    """Downloads the segment and renders a 1080x1920 9:16 vertical Short with blurred ambient padding."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     raw_clip_path = os.path.join(OUTPUT_DIR, "raw_clip.mp4")
     final_short_path = os.path.join(OUTPUT_DIR, "final_short.mp4")
@@ -490,53 +551,18 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
     video_id = extract_video_id(video_url)
     log(f"Downloading clip segment for '{video_id}' ({start_sec}s to {end_sec}s, duration: {duration}s)...", "FFMPEG")
     
-    # Strategy 1: yt-dlp Python Full-file download + local FFmpeg slice (No DASH range 400 errors)
     if download_via_ytdlp_python(video_url, start_sec, duration, raw_clip_path, cookies_file):
         log("Strategy 1 SUCCESS: Full source downloaded & sliced locally via yt-dlp Python!", "SUCCESS")
 
-    # Strategy 2: Direct CDN Stream URL Resolution
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
         log("Strategy 2: Trying direct CDN URL stream resolution into FFmpeg...", "INFO")
         if download_via_direct_stream_url(video_url, start_sec, duration, raw_clip_path, cookies_file):
             log("Strategy 2 SUCCESS: Direct CDN stream cut into FFmpeg!", "SUCCESS")
 
-    # Strategy 3: Gateway & Cobalt Stream Extractor (immune to datacenter IP blocks)
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
         log("Trying Strategy 3 (Cobalt & Gateway streams)...", "INFO")
         if download_segment_via_gateway(video_id, start_sec, duration, raw_clip_path):
             log("Strategy 3 SUCCESS: Clip segment downloaded via gateway stream!", "SUCCESS")
-
-    # Strategy 4: yt-dlp CLI fallback with Android client
-    if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Trying Strategy 4 (yt-dlp CLI single stream fallback)...", "WARN")
-        cmd_strat4 = [
-            "yt-dlp",
-            "--extractor-args", "youtube:player_client=android,ios,mweb",
-            "-f", "18/22/best[ext=mp4]/best",
-            "--no-check-certificates",
-            "-o", os.path.join(OUTPUT_DIR, "cli_temp.mp4"),
-            video_url
-        ]
-        if cookies_file and os.path.exists(cookies_file):
-            cmd_strat4.extend(["--cookies", cookies_file])
-        res_cli = subprocess.run(cmd_strat4, capture_output=True, text=True)
-        temp_cli_file = os.path.join(OUTPUT_DIR, "cli_temp.mp4")
-        if os.path.exists(temp_cli_file) and os.path.getsize(temp_cli_file) > 10000:
-            ff_slice = [
-                "ffmpeg", "-y",
-                "-ss", str(start_sec),
-                "-i", temp_cli_file,
-                "-t", str(duration),
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-c:a", "aac",
-                raw_clip_path
-            ]
-            subprocess.run(ff_slice, capture_output=True)
-            try:
-                os.remove(temp_cli_file)
-            except Exception:
-                pass
 
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
         raise FileNotFoundError("Failed to download raw video clip segment after all extraction strategies.")
@@ -687,7 +713,6 @@ def main():
     refresh_token = os.environ.get("YT_REFRESH_TOKEN")
     cookies_env = os.environ.get("YT_COOKIES")
 
-    # Setup cookies file if provided
     cookies_path = None
     if cookies_env and cookies_env.strip():
         os.makedirs(OUTPUT_DIR, exist_ok=True)
