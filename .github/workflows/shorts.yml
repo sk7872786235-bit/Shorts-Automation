@@ -1,46 +1,43 @@
-name: Automated YouTube Shorts Pipeline
-
+name: Auto Shorts Bot
 on:
   schedule:
-    # Runs every 30 minutes
     - cron: '*/30 * * * *'
-  workflow_dispatch: # Allows manual triggers from GitHub UI
+  workflow_dispatch:
 
 jobs:
-  generate-shorts:
+  run-bot:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to push processed.txt updates
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
+      - uses: actions/checkout@v4
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-
-      - name: Install System Dependencies (FFmpeg)
+          python-version: '3.10'
+          cache: 'pip'
+          
+      - name: Install FFmpeg & Python Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
-      - name: Install Python Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install google-genai \
-                      google-api-python-client \
-                      google-auth \
-                      google-auth-httplib2 \
-                      google-auth-oauthlib \
-                      youtube-transcript-api \
-                      yt-dlp \
-                      feedparser
-
-      - name: Execute Pipeline
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install yt-dlp youtube-transcript-api google-genai google-api-python-client google-auth feedparser
+          
+      - name: Run Automation Script
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
-          YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: python run.py
+        
+      - name: Save state to prevent duplicate uploads
         run: |
-          python run.py
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          # Create processed.txt if it doesn't exist yet
+          touch processed.txt 
+          git add processed.txt
+          git commit -m "chore: record processed video [skip ci]" || echo "No changes to commit"
+          git push
