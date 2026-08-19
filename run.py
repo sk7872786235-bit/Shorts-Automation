@@ -7,7 +7,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
 
 def download_media(video_id, output_filename, is_audio=False):
-    """Downloads media natively using yt-dlp with client disguises to bypass bot blocks."""
+    """Downloads media natively using yt-dlp, utilizing cookies to bypass datacenter blocks."""
     print(f"Downloading via yt-dlp...", flush=True)
     
     ydl_opts = {
@@ -15,8 +15,6 @@ def download_media(video_id, output_filename, is_audio=False):
         'outtmpl': output_filename.replace('.mp3', '') if is_audio else output_filename,
         'quiet': False,
         'no_warnings': True,
-        # THE FIX: Disguise the scraper to bypass the Android VR bot-blocker
-        'extractor_args': {'youtube': {'player_client': ['web_safari', 'ios']}}
     }
     
     if is_audio:
@@ -26,6 +24,16 @@ def download_media(video_id, output_filename, is_audio=False):
         }]
     else:
         ydl_opts['merge_output_format'] = 'mp4'
+
+    # THE FIX: Apply cookies if the secret exists
+    cookies_content = os.environ.get("YT_COOKIES", "").strip()
+    if cookies_content:
+        with open("cookies.txt", "w") as f:
+            f.write(cookies_content)
+        ydl_opts['cookiefile'] = 'cookies.txt'
+        print("✅ Using YT_COOKIES secret to bypass bot detection...", flush=True)
+    else:
+        print("⚠️ No YT_COOKIES found in GitHub Secrets. Download will likely fail on Datacenter IP.", flush=True)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -39,6 +47,9 @@ def download_media(video_id, output_filename, is_audio=False):
     except Exception as e:
         print(f"🚨 yt-dlp failed: {e}", flush=True)
         sys.exit(1)
+    finally:
+        if os.path.exists("cookies.txt"):
+            os.remove("cookies.txt")
 
 def main():
     channel_id = os.environ.get("YT_CHANNEL_ID")
@@ -60,7 +71,6 @@ def main():
     
     print("Fetching latest videos via official API...", flush=True)
     
-    # Every channel has an invisible "Uploads" playlist using 'UU' instead of 'UC'
     uploads_playlist_id = "UU" + channel_id[2:]
     
     try:
@@ -146,7 +156,6 @@ def main():
         mime_type="audio/mp3"
     )
     
-    # Correct Gemini model confirmed by your environment
     response = client.models.generate_content(
         model="gemini-3.6-flash",
         contents=[audio_part, prompt],
