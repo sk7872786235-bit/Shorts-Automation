@@ -1,5 +1,6 @@
 import os, sys, json, feedparser, subprocess, requests, time
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
@@ -46,20 +47,18 @@ def download_via_invidious(video_id, output_filename, is_audio=False):
 def main():
     channel_id = os.environ.get("YT_CHANNEL_ID")
     
-    # Check if the secret exists
     if not channel_id:
         print("🚨 ERROR: YT_CHANNEL_ID is missing from your GitHub Secrets!", flush=True)
         sys.exit(1)
         
     print(f"Fetching RSS feed for channel: {channel_id}", flush=True)
     
-    # Pretend to be a Windows Web Browser so YouTube doesn't block the RSS request
     feedparser.USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id.strip()}"
     feed = feedparser.parse(feed_url)
     
     if not feed.entries:
-        print("🚨 No videos found! Ensure your YT_CHANNEL_ID starts with 'UC' and is NOT a @handle.", flush=True)
+        print("🚨 No videos found! Ensure your YT_CHANNEL_ID starts with 'UC'.", flush=True)
         sys.exit(0)
 
     if not os.path.exists("processed.txt"):
@@ -92,21 +91,27 @@ def main():
     print("Uploading audio to Gemini...", flush=True)
     
     api_key = os.environ["GEMINI_API_KEY"].strip()
-    genai.configure(api_key=api_key)
+    client = genai.Client(api_key=api_key)
     
-    audio_file = genai.upload_file("audio.m4a")
+    audio_file = client.files.upload(
+        file="audio.m4a", 
+        config={'mime_type': 'audio/mp4'}
+    )
     
     print("Waiting for Google's servers to process the audio track...", flush=True)
-    while audio_file.state.name == "PROCESSING":
-        print(".", end="", flush=True)
-        time.sleep(2)
-        audio_file = genai.get_file(audio_file.name)
+    while True:
+        audio_file = client.files.get(name=audio_file.name)
+        state_str = str(getattr(audio_file, 'state', ''))
         
-    if audio_file.state.name == "FAILED":
-        print("\n❌ Gemini failed to process audio.", flush=True)
-        sys.exit(1)
-        
-    print("\n✅ Audio ready!", flush=True)
+        if "PROCESSING" in state_str:
+            print(".", end="", flush=True)
+            time.sleep(3)
+        elif "FAILED" in state_str:
+            print("\n❌ Gemini failed to process audio.", flush=True)
+            sys.exit(1)
+        else:
+            print("\n✅ Audio ready!", flush=True)
+            break
     
     prompt = """
     Listen to this audio track from a kids' YouTube video. 
@@ -117,11 +122,15 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    # THE FIX: Explicitly wrap the file in Part.from_uri to bypass the 'invalid argument/AFC' SDK bug
+    audio_part = types.Part.from_uri(
+        file_uri=audio_file.uri,
+        mime_type="audio/mp4"
+    )
     
-    response = model.generate_content(
-        [audio_file, prompt],
-        generation_config=genai.GenerationConfig(response_mime_type="application/json")
+    response = client.models.generate_content(
+        model="gemini-3.6-flash",
+        contents=[audio_part, prompt]
     )
     
     clean_json = response.text.strip().replace("```json", "").replace("```", "")
@@ -176,7 +185,7 @@ def main():
         f.write(f"{video_id}\n")
 
     try:
-        genai.delete_file(audio_file.name)
+        client.files.delete(name=audio_file.name)
     except:
         pass
 
