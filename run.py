@@ -92,7 +92,6 @@ def main():
     api_key = os.environ["GEMINI_API_KEY"].strip()
     client = genai.Client(api_key=api_key)
     
-    # Uploading with strict MIME type so the Linux server doesn't pass it as a raw binary blob
     audio_file = client.files.upload(
         file="audio.mp4", 
         config={'mime_type': 'audio/mp4'}
@@ -122,14 +121,30 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # THE FIX: Pass the audio_file natively and use a simple dictionary for the config
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=[audio_file, prompt],
-        config={"response_mime_type": "application/json"}
-    )
+    # THE FIX: Complete SDK Bypass using raw HTTP Requests
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key}"
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"fileData": {"mimeType": "audio/mp4", "fileUri": audio_file.uri}},
+                    {"text": prompt}
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json"
+        }
+    }
     
-    clean_json = response.text.strip().replace("```json", "").replace("```", "")
+    resp = requests.post(url, json=payload)
+    
+    if resp.status_code != 200:
+        print(f"❌ API Request Failed: {resp.text}", flush=True)
+        sys.exit(1)
+        
+    data = resp.json()
+    clean_json = data['candidates'][0]['content']['parts'][0]['text'].strip().replace("```json", "").replace("```", "")
     timestamps = json.loads(clean_json)
     
     start = int(timestamps["start"])
