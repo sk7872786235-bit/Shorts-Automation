@@ -5,60 +5,88 @@ from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
 
-def download_via_piped(video_id, output_filename, is_audio=False):
-    """Uses the highly resilient Piped API network to proxy downloads, bypassing YouTube blocks."""
+def download_via_cobalt(video_id, output_filename, is_audio=False):
+    """Uses the highly advanced Cobalt API network to proxy downloads, bypassing YouTube IP blocks."""
+    yt_url = f"https://www.youtube.com/watch?v={video_id}"
+    print("Fetching fresh list of Cobalt proxies...", flush=True)
+    
+    # Massive fallback list of known public Cobalt instances
     instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.tokhmi.xyz",
-        "https://pipedapi.syncpundit.io",
-        "https://piapi.ggtyler.dev",
-        "https://pipedapi.smnz.de",
-        "https://piped-api.lunar.icu"
+        "https://api.cobalt.tools",
+        "https://api.cobalt.my.id",
+        "https://cobalt-api.kwiatechu.com",
+        "https://co.eepy.today",
+        "https://cobalt.mrcyjanek.net",
+        "https://cobalt.c.rest",
+        "https://api.only-dank.com",
     ]
     
+    try:
+        # Dynamically fetch the latest active community instances
+        r = requests.get("https://instances.hyper.lol/instances.json", timeout=10)
+        data = r.json()
+        dynamic_instances = [inst["api_url"] for inst in data if inst.get("api_online") and inst.get("trust_status") == "trusted"]
+        if dynamic_instances:
+            instances = dynamic_instances + instances
+    except Exception as e:
+        print(f"Failed to fetch dynamic list, relying on hardcoded fallbacks: {e}", flush=True)
+
+    # De-duplicate while preserving order
+    seen = set()
+    instances = [x for x in instances if not (x in seen or seen.add(x))]
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    
     for instance in instances:
-        print(f"Trying Piped API proxy: {instance}...", flush=True)
+        print(f"Trying Cobalt API proxy: {instance}...", flush=True)
         try:
-            url = f"{instance}/streams/{video_id}"
-            response = requests.get(url, timeout=15)
+            base_url = instance.rstrip("/")
             
+            # v7 API Payload (New Standard)
+            payload_v7 = {
+                "url": yt_url,
+                "downloadMode": "audio" if is_audio else "auto",
+            }
+            if is_audio:
+                payload_v7["audioFormat"] = "mp3"
+            else:
+                payload_v7["videoQuality"] = "1080"
+                
+            # v6 API Payload (Legacy Fallback)
+            payload_v6 = {
+                "url": yt_url,
+                "isAudioOnly": is_audio,
+                "aFormat": "mp3" if is_audio else "best",
+                "vQuality": "1080"
+            }
+            
+            # Try v7 standard first
+            response = requests.post(f"{base_url}/", json=payload_v7, headers=headers, timeout=15)
+            
+            if response.status_code == 404 or response.status_code == 405:
+                # If the server is older, fallback to v6
+                response = requests.post(f"{base_url}/api/json", json=payload_v6, headers=headers, timeout=15)
+                
             if response.status_code != 200:
                 print(f"❌ Server returned {response.status_code}. Trying next...", flush=True)
                 continue
                 
             data = response.json()
-            if "error" in data:
-                print(f"❌ API returned error: {data['error']}. Trying next...", flush=True)
+            if data.get("status") == "error":
+                print(f"❌ API Error: {data.get('text', data.get('error', 'Unknown Error'))}. Trying next...", flush=True)
                 continue
                 
-            download_url = None
-            if is_audio:
-                # Target the highest quality M4A audio stream
-                for stream in data.get("audioStreams", []):
-                    if stream.get("format") == "M4A":
-                        download_url = stream.get("url")
-                        break
-                # Fallback to the first available audio track if M4A is missing
-                if not download_url and data.get("audioStreams"):
-                    download_url = data["audioStreams"][0].get("url")
-            else:
-                # Target a combined Video+Audio stream (MPEG_4 / MP4)
-                for stream in data.get("videoStreams", []):
-                    if not stream.get("videoOnly") and stream.get("format") == "MPEG_4":
-                        download_url = stream.get("url")
-                        break
-                # Fallback if no combined MPEG_4 is found
-                if not download_url:
-                    for stream in data.get("videoStreams", []):
-                        if not stream.get("videoOnly"):
-                            download_url = stream.get("url")
-                            break
-                            
+            download_url = data.get("url")
             if not download_url:
-                print("❌ No compatible stream found on this instance. Trying next...", flush=True)
+                print("❌ No download URL found in response. Trying next...", flush=True)
                 continue
                 
             print(f"Connecting to proxy stream...", flush=True)
+            # Note: We omit the API headers here because we are fetching the raw file
             stream_response = requests.get(download_url, stream=True, timeout=30)
             
             if stream_response.status_code == 200:
@@ -67,7 +95,6 @@ def download_via_piped(video_id, output_filename, is_audio=False):
                         if chunk:
                             f.write(chunk)
                             
-                # Safety check against corrupted or empty files
                 if os.path.getsize(output_filename) < 100000:
                     print("❌ Downloaded file is suspiciously small. Trying next...", flush=True)
                     continue
@@ -81,7 +108,7 @@ def download_via_piped(video_id, output_filename, is_audio=False):
             print(f"❌ Connection error: {e}. Trying next...", flush=True)
             continue
             
-    print("🚨 All Piped proxies failed. YouTube might be blocking datacenters. Waiting for retry.", flush=True)
+    print("🚨 All Cobalt proxies failed. Waiting for next cron schedule to retry.", flush=True)
     sys.exit(1)
 
 def main():
@@ -122,9 +149,9 @@ def main():
 
     print(f"Processing Kids Video: {video_title} ({video_id})", flush=True)
 
-    # 1. Download AUDIO natively as M4A (saved as MP4 to bypass Linux metadata quirks)
+    # 1. Download AUDIO via Cobalt (Natively fetched as MP3)
     print("\n--- FETCHING AUDIO ---", flush=True)
-    download_via_piped(video_id, "audio.mp4", is_audio=True)
+    download_via_cobalt(video_id, "audio.mp3", is_audio=True)
 
     # 2. Upload Audio to Gemini
     print("\n--- AI ANALYSIS ---", flush=True)
@@ -134,8 +161,8 @@ def main():
     client = genai.Client(api_key=api_key)
     
     audio_file = client.files.upload(
-        file="audio.mp4", 
-        config={'mime_type': 'audio/mp4'}
+        file="audio.mp3", 
+        config={'mime_type': 'audio/mp3'}
     )
     
     print("Waiting for Google's servers to process the audio track...", flush=True)
@@ -164,7 +191,7 @@ def main():
     
     audio_part = types.Part.from_uri(
         file_uri=audio_file.uri, 
-        mime_type="audio/mp4"
+        mime_type="audio/mp3"
     )
     
     response = client.models.generate_content(
@@ -184,7 +211,7 @@ def main():
 
     # 3. Download the FULL video
     print("\n--- FETCHING VIDEO ---", flush=True)
-    download_via_piped(video_id, "full_video.mp4", is_audio=False)
+    download_via_cobalt(video_id, "full_video.mp4", is_audio=False)
 
     # 4. Crop to 9:16 vertical
     print("\n--- CROPPING VIDEO ---", flush=True)
