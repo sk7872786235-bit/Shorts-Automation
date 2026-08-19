@@ -3,11 +3,12 @@
 YouTube Shorts Automation Engine (run.py)
 =========================================
 Features:
-1. Multi-Tier Download Engine (pytubefix Android/iOS + Authenticated yt-dlp + Cobalt + Gateways).
-2. Zero-Quota Cookie Upload Protocol (YT_COOKIES) with automatic fallback to OAuth API.
-3. Anti-duplication state engine (history.json) preventing repeated clips.
-4. Gemini AI viral moment detector (30-55s intervals with high-CTR titles).
-5. High-quality 1080x1920 9:16 vertical video rendering with blurred ambient padding.
+1. Pro Download Engine: Progressive MP4 + Local FFmpeg slice (bypasses PoToken & DASH bot challenges).
+2. Zero-Quota Cookie-Based Upload Protocol (YT_COOKIES): 0 API units consumed.
+3. Auto-fallback to YouTube Data API v3 OAuth if cookies expire.
+4. Strict segment history tracker (history.json) guaranteeing NO duplicate clips.
+5. Gemini AI detection of high-retention 30-55s viral moments with high-CTR titles.
+6. High-quality 1080x1920 9:16 vertical video rendering with blurred ambient padding.
 """
 
 import os
@@ -21,6 +22,7 @@ import subprocess
 from datetime import datetime, timezone
 import requests
 
+# Constants & Configuration
 HISTORY_FILE = "history.json"
 OUTPUT_DIR = "temp_output"
 MIN_CLIP_DURATION = 30
@@ -234,6 +236,31 @@ Output ONLY valid JSON:
         "overlay_hook_text": "WAIT FOR THIS MOMENT!"
     }
 
+def save_sanitized_cookies(raw_cookie_text, output_path):
+    """Sanitizes Netscape cookies ensuring mandatory headers and base64 handling."""
+    if not raw_cookie_text or not raw_cookie_text.strip():
+        return None
+    text = raw_cookie_text.strip()
+    try:
+        import base64
+        decoded = base64.b64decode(text).decode('utf-8')
+        if "youtube.com" in decoded or "LOGIN_INFO" in decoded or "SID" in decoded:
+            text = decoded
+    except Exception:
+        pass
+
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    formatted = ["# Netscape HTTP Cookie File", "# This is a generated cookie file for yt-dlp automation"]
+    for l in lines:
+        if l.startswith("# Netscape") or l.startswith("# http"):
+            continue
+        formatted.append(l)
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(formatted) + "\n")
+    return output_path
+
 def extract_video_id(url_or_id):
     if "v=" in url_or_id:
         return url_or_id.split("v=")[1].split("&")[0]
@@ -241,24 +268,55 @@ def extract_video_id(url_or_id):
         return url_or_id.split("youtu.be/")[1].split("?")[0]
     return url_or_id
 
-def download_segment_via_pytubefix(video_url, start_sec, duration, output_path):
-    """Downloads segment using pytubefix with multi-client fallbacks (ANDROID, IOS, MWEB, TV)."""
+def download_via_ytdlp_python(video_url, start_sec, duration, output_path, cookies_path=None):
+    """
+    Pro Strategy 1: Uses yt_dlp Python API directly to fetch single-stream progressive MP4.
+    Bypasses DASH/SABR range-slicing bot challenges by downloading standard format 18/22,
+    then cuts the segment locally with FFmpeg with zero latency.
+    """
     try:
-        from pytubefix import YouTube
-        clients_to_try = ['ANDROID', 'IOS', 'MWEB', 'ANDROID_VR', 'WEB']
-        for client_name in clients_to_try:
+        import yt_dlp
+        full_source = os.path.join(OUTPUT_DIR, "source_full.mp4")
+        if os.path.exists(full_source):
             try:
-                log(f"Attempting stream download via pytubefix (Client: {client_name})...", "INFO")
-                yt = YouTube(video_url, client=client_name)
-                stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
-                if not stream:
-                    stream = yt.streams.filter(file_extension='mp4').first()
-                if stream and stream.url:
-                    log(f"pytubefix ({client_name}) stream acquired! Cutting segment via FFmpeg...", "SUCCESS")
+                os.remove(full_source)
+            except Exception:
+                pass
+
+        client_configs = [
+            ['android', 'ios'],
+            ['android_creator', 'mweb'],
+            ['web_safari', 'mweb'],
+            ['web', 'mweb']
+        ]
+
+        for clients in client_configs:
+            try:
+                log(f"Attempting yt-dlp Python engine with clients: {clients}...", "INFO")
+                ydl_opts = {
+                    'format': '18/22/best[ext=mp4]/best',
+                    'outtmpl': full_source,
+                    'quiet': True,
+                    'no_warnings': True,
+                    'nocheckcertificate': True,
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': clients
+                        }
+                    }
+                }
+                if cookies_path and os.path.exists(cookies_path):
+                    ydl_opts['cookiefile'] = cookies_path
+
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([video_url])
+
+                if os.path.exists(full_source) and os.path.getsize(full_source) > 10000:
+                    log("Full progressive video acquired! Slicing clip via local FFmpeg...", "SUCCESS")
                     ff_cmd = [
                         "ffmpeg", "-y",
                         "-ss", str(start_sec),
-                        "-i", stream.url,
+                        "-i", full_source,
                         "-t", str(duration),
                         "-c:v", "libx264",
                         "-preset", "ultrafast",
@@ -267,12 +325,62 @@ def download_segment_via_pytubefix(video_url, start_sec, duration, output_path):
                     ]
                     subprocess.run(ff_cmd, capture_output=True, timeout=90)
                     if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                        try:
+                            os.remove(full_source)
+                        except Exception:
+                            pass
                         return True
-            except Exception as ce:
-                log(f"pytubefix {client_name} notice: {ce}", "WARN")
+            except Exception as ye:
+                log(f"yt-dlp clients {clients} notice: {ye}", "WARN")
                 continue
     except Exception as e:
-        log(f"pytubefix general notice: {e}", "WARN")
+        log(f"yt-dlp Python API notice: {e}", "WARN")
+    return False
+
+def download_via_direct_stream_url(video_url, start_sec, duration, output_path, cookies_path=None):
+    """
+    Pro Strategy 2: Extracts direct googlevideo.com CDN URL and streams directly into FFmpeg input.
+    """
+    try:
+        import yt_dlp
+        ydl_opts = {
+            'format': '18/22/best[ext=mp4]/best',
+            'quiet': True,
+            'no_warnings': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'ios', 'mweb']
+                }
+            }
+        }
+        if cookies_path and os.path.exists(cookies_path):
+            ydl_opts['cookiefile'] = cookies_path
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            stream_url = info.get('url')
+            if not stream_url and 'formats' in info:
+                for f in reversed(info['formats']):
+                    if f.get('url') and (f.get('ext') == 'mp4' or 'video' in f.get('vcodec', '')):
+                        stream_url = f['url']
+                        break
+            if stream_url:
+                log("Direct googlevideo CDN stream URL resolved! Cutting with FFmpeg...", "SUCCESS")
+                ff_cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(start_sec),
+                    "-i", stream_url,
+                    "-t", str(duration),
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-c:a", "aac",
+                    output_path
+                ]
+                subprocess.run(ff_cmd, capture_output=True, timeout=90)
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                    return True
+    except Exception as e:
+        log(f"Direct stream URL extraction notice: {e}", "WARN")
     return False
 
 def download_segment_via_gateway(video_id, start_sec, duration, output_path):
@@ -366,6 +474,7 @@ def download_segment_via_gateway(video_id, start_sec, duration, output_path):
     return False
 
 def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_file=None):
+    """Downloads the segment and renders a 1080x1920 9:16 vertical Short with blurred ambient padding."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     raw_clip_path = os.path.join(OUTPUT_DIR, "raw_clip.mp4")
     final_short_path = os.path.join(OUTPUT_DIR, "final_short.mp4")
@@ -380,28 +489,16 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
     duration = end_sec - start_sec
     video_id = extract_video_id(video_url)
     log(f"Downloading clip segment for '{video_id}' ({start_sec}s to {end_sec}s, duration: {duration}s)...", "FFMPEG")
+    
+    # Strategy 1: yt-dlp Python Full-file download + local FFmpeg slice (No DASH range 400 errors)
+    if download_via_ytdlp_python(video_url, start_sec, duration, raw_clip_path, cookies_file):
+        log("Strategy 1 SUCCESS: Full source downloaded & sliced locally via yt-dlp Python!", "SUCCESS")
 
-    # Strategy 1: pytubefix with multi-client fallbacks (Android/iOS bypasses PoToken)
-    if download_segment_via_pytubefix(video_url, start_sec, duration, raw_clip_path):
-        log("Strategy 1 SUCCESS: Downloaded via pytubefix!", "SUCCESS")
-
-    # Strategy 2: Authenticated yt-dlp using YT_COOKIES (if available)
-    if (not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000) and cookies_file and os.path.exists(cookies_file):
-        log("Strategy 2: Trying yt-dlp with authenticated YT_COOKIES...", "INFO")
-        cmd_cookies = [
-            "yt-dlp",
-            "--cookies", cookies_file,
-            "--extractor-args", "youtube:player_client=web,mweb,android",
-            "-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
-            "--download-sections", f"*{start_sec}-{end_sec}",
-            "--force-keyframes-at-cuts",
-            "--no-check-certificates",
-            "-o", raw_clip_path,
-            video_url
-        ]
-        subprocess.run(cmd_cookies, capture_output=True, text=True)
-        if os.path.exists(raw_clip_path) and os.path.getsize(raw_clip_path) > 10000:
-            log("Strategy 2 SUCCESS: Downloaded via authenticated cookies yt-dlp!", "SUCCESS")
+    # Strategy 2: Direct CDN Stream URL Resolution
+    if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
+        log("Strategy 2: Trying direct CDN URL stream resolution into FFmpeg...", "INFO")
+        if download_via_direct_stream_url(video_url, start_sec, duration, raw_clip_path, cookies_file):
+            log("Strategy 2 SUCCESS: Direct CDN stream cut into FFmpeg!", "SUCCESS")
 
     # Strategy 3: Gateway & Cobalt Stream Extractor (immune to datacenter IP blocks)
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
@@ -409,52 +506,37 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
         if download_segment_via_gateway(video_id, start_sec, duration, raw_clip_path):
             log("Strategy 3 SUCCESS: Clip segment downloaded via gateway stream!", "SUCCESS")
 
-    # Strategy 4: yt-dlp with Android / iOS mobile extractor
+    # Strategy 4: yt-dlp CLI fallback with Android client
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Trying Strategy 4 (yt-dlp Android/iOS mobile spoofing)...", "WARN")
+        log("Trying Strategy 4 (yt-dlp CLI single stream fallback)...", "WARN")
         cmd_strat4 = [
             "yt-dlp",
             "--extractor-args", "youtube:player_client=android,ios,mweb",
             "-f", "18/22/best[ext=mp4]/best",
-            "--download-sections", f"*{start_sec}-{end_sec}",
-            "--force-keyframes-at-cuts",
             "--no-check-certificates",
-            "-o", raw_clip_path,
+            "-o", os.path.join(OUTPUT_DIR, "cli_temp.mp4"),
             video_url
         ]
         if cookies_file and os.path.exists(cookies_file):
             cmd_strat4.extend(["--cookies", cookies_file])
-        subprocess.run(cmd_strat4, capture_output=True, text=True)
-
-    # Strategy 5: Direct HTTP media URL extraction into FFmpeg
-    if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Trying Strategy 5 (yt-dlp direct stream URL extraction)...", "WARN")
-        cmd_strat5 = [
-            "yt-dlp",
-            "--extractor-args", "youtube:player_client=android,mweb",
-            "-g",
-            video_url
-        ]
-        if cookies_file and os.path.exists(cookies_file):
-            cmd_strat5.extend(["--cookies", cookies_file])
-        res5 = subprocess.run(cmd_strat5, capture_output=True, text=True)
-        if res5.returncode == 0 and res5.stdout.strip():
-            stream_urls = res5.stdout.strip().split("\n")
-            video_stream = stream_urls[0]
-            audio_stream = stream_urls[1] if len(stream_urls) > 1 else stream_urls[0]
-            ffmpeg_stream_cmd = [
+        res_cli = subprocess.run(cmd_strat4, capture_output=True, text=True)
+        temp_cli_file = os.path.join(OUTPUT_DIR, "cli_temp.mp4")
+        if os.path.exists(temp_cli_file) and os.path.getsize(temp_cli_file) > 10000:
+            ff_slice = [
                 "ffmpeg", "-y",
                 "-ss", str(start_sec),
-                "-i", video_stream,
-                "-ss", str(start_sec),
-                "-i", audio_stream,
+                "-i", temp_cli_file,
                 "-t", str(duration),
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
                 "-c:a", "aac",
                 raw_clip_path
             ]
-            subprocess.run(ffmpeg_stream_cmd, capture_output=True)
+            subprocess.run(ff_slice, capture_output=True)
+            try:
+                os.remove(temp_cli_file)
+            except Exception:
+                pass
 
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
         raise FileNotFoundError("Failed to download raw video clip segment after all extraction strategies.")
@@ -586,12 +668,12 @@ def upload_short_to_youtube(video_path, clip_meta, access_token=None, cookies_fi
     return new_video_id, "oauth_api"
 
 def main():
-    parser = argparse.ArgumentParser(description="YouTube Shorts Automation Engine")
-    parser.add_argument("--dry-run", action="store_true", help="Simulate without uploading")
+    parser = argparse.ArgumentParser(description="YouTube Shorts Automation Bot")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate everything without uploading")
     parser.add_argument("--force-video-id", type=str, help="Specific YouTube video ID to cut from")
     parser.add_argument("--start-sec", type=int, help="Manual override start seconds")
     parser.add_argument("--end-sec", type=int, help="Manual override end seconds")
-    parser.add_argument("--privacy", type=str, default="public", choices=["public", "unlisted", "private"])
+    parser.add_argument("--privacy", type=str, default="public", choices=["public", "unlisted", "private"], help="Privacy status")
     args = parser.parse_args()
 
     log("=" * 60, "INFO")
@@ -605,13 +687,13 @@ def main():
     refresh_token = os.environ.get("YT_REFRESH_TOKEN")
     cookies_env = os.environ.get("YT_COOKIES")
 
+    # Setup cookies file if provided
     cookies_path = None
     if cookies_env and cookies_env.strip():
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        cookies_path = os.path.join(OUTPUT_DIR, "cookies.txt")
-        with open(cookies_path, "w", encoding="utf-8") as cf:
-            cf.write(cookies_env.strip())
-        log("Detected YT_COOKIES secret! Zero-Quota upload protocol enabled.", "COOKIE")
+        raw_cookie_target = os.path.join(OUTPUT_DIR, "cookies.txt")
+        cookies_path = save_sanitized_cookies(cookies_env, raw_cookie_target)
+        log("Detected YT_COOKIES secret! Zero-Quota upload protocol enabled & cookies formatted.", "COOKIE")
 
     missing = []
     if not gemini_key: missing.append("GEMINI_API_KEY")
