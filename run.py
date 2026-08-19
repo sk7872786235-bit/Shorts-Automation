@@ -3,13 +3,11 @@
 YouTube Shorts Automation Engine (run.py)
 =========================================
 Features:
-1. Zero-Quota Cookie Upload Protocol (YT_COOKIES): 0 API units consumed.
-2. Auto-fallback to YouTube Data API v3 OAuth if cookies are not provided.
-3. Robust 3-strategy video segment downloader (bypasses datacenter IP restrictions).
-4. Strict segment history tracker (history.json) guaranteeing NO duplicate clips.
-5. Gemini AI detection of high-retention 30-55s viral moments with high-CTR titles.
-6. High-quality 1080x1920 9:16 vertical video rendering with blurred ambient padding.
-7. Rich GitHub Actions Step Summaries for execution monitoring.
+1. Zero-Quota Cookie Upload Protocol (YT_COOKIES) with automatic fallback to OAuth API.
+2. Robust 3-strategy video segment downloader (Android/iOS spoofing bypassing IP & cookie blocks).
+3. Anti-duplication state engine (history.json) preventing repeated clips.
+4. Gemini AI viral moment detector (30-55s intervals with high-CTR titles).
+5. High-quality 1080x1920 9:16 vertical video rendering with blurred ambient padding.
 """
 
 import os
@@ -23,15 +21,11 @@ import subprocess
 from datetime import datetime, timezone
 import requests
 
-# ==========================================
-# CONSTANTS & CONFIGURATION
-# ==========================================
 HISTORY_FILE = "history.json"
 OUTPUT_DIR = "temp_output"
 MIN_CLIP_DURATION = 30
 MAX_CLIP_DURATION = 55
 MAX_OVERLAP_SECONDS = 5
-UPLOAD_QUOTA_COST = 1600
 
 def log(msg, level="INFO"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -57,9 +51,6 @@ def append_github_summary(markdown_text):
         except Exception as e:
             log(f"Failed to write to GITHUB_STEP_SUMMARY: {e}", "WARN")
 
-# ==========================================
-# 1. HISTORY & DUPLICATION TRACKER
-# ==========================================
 def load_history():
     if os.path.exists(HISTORY_FILE):
         try:
@@ -92,9 +83,6 @@ def is_segment_overlapping(start, end, used_intervals):
             return True, interval, overlap
     return False, None, 0
 
-# ==========================================
-# 2. OAUTH2 TOKEN MANAGER
-# ==========================================
 def get_authenticated_access_token(client_id, client_secret, refresh_token):
     if not client_id or not client_secret or not refresh_token:
         return None
@@ -120,17 +108,12 @@ def get_authenticated_access_token(client_id, client_secret, refresh_token):
         log(f"OAuth token request failed: {e}", "WARN")
     return None
 
-# ==========================================
-# 3. CHANNEL VIDEOS FETCHER (0 API Quota)
-# ==========================================
 def fetch_channel_videos(channel_id, access_token=None, max_results=15):
     log(f"Scanning channel '{channel_id}' for candidate long-form videos...", "INFO")
-    
-    # Method 1: yt-dlp flat playlist extraction with client spoofing
     try:
         cmd = [
             "yt-dlp",
-            "--extractor-args", "youtube:player_client=ios,web",
+            "--extractor-args", "youtube:player_client=android,ios,web",
             "--flat-playlist",
             "--print", "%(id)s\t%(title)s\t%(duration)s\t%(upload_date)s",
             f"https://www.youtube.com/channel/{channel_id}/videos",
@@ -159,7 +142,6 @@ def fetch_channel_videos(channel_id, access_token=None, max_results=15):
     except Exception as e:
         log(f"yt-dlp notice: {e}, falling back to RSS...", "WARN")
 
-    # Method 2: RSS fallback (0 Quota)
     try:
         rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
         resp = requests.get(rss_url, timeout=15)
@@ -185,27 +167,23 @@ def fetch_channel_videos(channel_id, access_token=None, max_results=15):
 
     return []
 
-# ==========================================
-# 4. GEMINI AI VIRAL MOMENT DETECTION
-# ==========================================
 def analyze_video_with_gemini(video_info, used_intervals, gemini_api_key):
     log(f"Asking Gemini AI to detect viral Short moment from: '{video_info['title']}'...", "GEMINI")
-    
     used_intervals_json = json.dumps(used_intervals)
-    prompt = f"""You are an elite YouTube Shorts Growth Hacker and automated video retention editor.
+    prompt = f"""You are an elite YouTube Shorts Growth Hacker and automated video editor.
 Select the next most engaging 30 to 55-second viral Short segment from my YouTube video.
 
 VIDEO DETAILS:
 - Title: "{video_info['title']}"
 - Video ID: {video_info['id']}
 - Total Estimated Duration: {video_info['duration']} seconds
-- ALREADY USED SEGMENTS (STRICT BAN - DO NOT OVERLAP BY > 5 SECONDS): {used_intervals_json}
+- ALREADY USED SEGMENTS (DO NOT OVERLAP BY > 5 SECONDS): {used_intervals_json}
 
 INSTRUCTIONS:
-1. Select a high-impact interval [start_sec, end_sec] between 30 and 55 seconds (end_sec - start_sec >= 30 and <= 55).
+1. Select a high-impact interval [start_sec, end_sec] between 30 and 55 seconds.
 2. The segment MUST NOT overlap with any interval in {used_intervals_json} by more than 5 seconds.
-3. Choose a moment with an immediate visual/auditory hook, surprising punchline, or high emotional retention.
-4. Craft a high-CTR YouTube Short Title (< 50 characters) ending with 1 emoji and '#Shorts'.
+3. Choose a moment with an immediate hook, surprising visual, or punchline.
+4. Craft a high-CTR YouTube Short Title (< 50 chars) ending with 1 emoji and '#Shorts'.
 5. Provide a 2-line description with top trending hashtags (#Shorts #viral #trending #youtube).
 6. Provide a punchy 3-5 word uppercase overlay hook text for the first 3 seconds.
 
@@ -242,7 +220,6 @@ Output ONLY valid JSON:
     except Exception as e:
         log(f"Gemini API note: {e}", "WARN")
 
-    # Safe algorithmic fallback
     last_end = max([int(i.get("end", 0)) for i in used_intervals], default=15)
     start = min(last_end + 10, max(0, video_info['duration'] - 60))
     end = start + 45
@@ -257,11 +234,7 @@ Output ONLY valid JSON:
         "overlay_hook_text": "WAIT FOR THIS MOMENT!"
     }
 
-# ==========================================
-# 5. VIDEO PROCESSOR (Robust yt-dlp + ffmpeg 9:16)
-# ==========================================
 def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_file=None):
-    """Downloads the segment and renders a 1080x1920 9:16 vertical Short with blurred ambient padding."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     raw_clip_path = os.path.join(OUTPUT_DIR, "raw_clip.mp4")
     final_short_path = os.path.join(OUTPUT_DIR, "final_short.mp4")
@@ -275,34 +248,27 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
 
     duration = end_sec - start_sec
     log(f"Downloading clip segment ({start_sec}s to {end_sec}s, duration: {duration}s)...", "FFMPEG")
-    
-    cookies_arg = []
-    if cookies_file and os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 10:
-        cookies_arg = ["--cookies", cookies_file]
 
-    # Strategy 1: Direct Range Stream Download via yt-dlp with iOS/Web client spoofing
+    # Clean direct extraction with Android/iOS client spoofing (does not rely on expired browser cookies)
     log("Strategy 1: Attempting direct section stream extraction...", "INFO")
     cmd_strat1 = [
         "yt-dlp",
-        "--extractor-args", "youtube:player_client=ios,web,android",
-        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+        "--extractor-args", "youtube:player_client=android,ios,web",
+        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
         "--download-sections", f"*{start_sec}-{end_sec}",
         "--force-keyframes-at-cuts",
-        *cookies_arg,
         "--no-check-certificates",
         "-o", raw_clip_path,
         video_url
     ]
     res1 = subprocess.run(cmd_strat1, capture_output=True, text=True)
     
-    # Strategy 2: If Strategy 1 failed, fetch stream direct media URLs and use FFmpeg input seeking
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
         log("Strategy 1 notice. Trying Strategy 2 (FFmpeg direct HTTP range stream)...", "WARN")
         cmd_strat2 = [
             "yt-dlp",
-            "--extractor-args", "youtube:player_client=ios,web",
+            "--extractor-args", "youtube:player_client=android,ios",
             "-g",
-            *cookies_arg,
             video_url
         ]
         res2 = subprocess.run(cmd_strat2, capture_output=True, text=True)
@@ -325,14 +291,13 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
             ]
             subprocess.run(ffmpeg_stream_cmd, capture_output=True)
 
-    # Strategy 3: Download standard pre-muxed stream fallback
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Strategy 2 notice. Trying Strategy 3 (Standard single stream download)...", "WARN")
+        log("Strategy 2 notice. Trying Strategy 3 (Standard single stream fallback)...", "WARN")
         cmd_strat3 = [
             "yt-dlp",
+            "--extractor-args", "youtube:player_client=android,web",
             "-f", "18/22/best",
             "--download-sections", f"*{start_sec}-{end_sec}",
-            *cookies_arg,
             "-o", raw_clip_path,
             video_url
         ]
@@ -340,7 +305,7 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
 
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
         err_details = res1.stderr if res1.stderr else "Unknown download error"
-        raise FileNotFoundError(f"Failed to download raw video clip segment. Details: {err_details[:200]}")
+        raise FileNotFoundError(f"Failed to download raw video clip segment after all strategies. Details: {err_details[:200]}")
 
     log("Rendering vertical 9:16 (1080x1920) Short with blurred ambient background...", "FFMPEG")
     
@@ -376,9 +341,6 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
     log(f"Rendered Short successfully ({size_mb:.2f} MB): {final_short_path}", "SUCCESS")
     return final_short_path
 
-# ==========================================
-# 6. YOUTUBE UPLOADER (COOKIE ZERO-QUOTA + OAUTH)
-# ==========================================
 def parse_netscape_cookies(cookie_text):
     cookies_dict = {}
     for line in cookie_text.splitlines():
@@ -433,7 +395,7 @@ def upload_short_to_youtube(video_path, clip_meta, access_token=None, cookies_fi
     if not access_token:
         raise Exception("Neither valid YT_COOKIES nor active OAuth access token is available for upload.")
 
-    log(f"Uploading Short to YouTube Data API v3 (1,600 units): '{clip_meta['title']}'...", "YT")
+    log(f"Uploading Short to YouTube Data API v3: '{clip_meta['title']}'...", "YT")
     
     metadata = {
         "snippet": {
@@ -471,9 +433,6 @@ def upload_short_to_youtube(video_path, clip_meta, access_token=None, cookies_fi
     log(f"🎉 SHORT PUBLISHED SUCCESSFULLY VIA DATA API! Video ID: {new_video_id}", "SUCCESS")
     return new_video_id, "oauth_api"
 
-# ==========================================
-# 7. MAIN ORCHESTRATOR & CLI
-# ==========================================
 def main():
     parser = argparse.ArgumentParser(description="YouTube Shorts Automation Engine")
     parser.add_argument("--dry-run", action="store_true", help="Simulate without uploading")
@@ -636,7 +595,7 @@ def main():
     history["daily_upload_count"] += 1
     save_history(history)
 
-    quota_desc = "⚡ 0 Quota Units Consumed (Cookie Protocol)" if upload_method == "cookie_zero_quota" else "1,600 Quota Units (OAuth API v3)"
+    quota_desc = "⚡ 0 Quota Units Consumed (Cookie Protocol)" if upload_method == "cookie_zero_quota" else "1 Upload Bucket Point (OAuth API)"
     summary_md = f"""## 🎬 YouTube Shorts Automation Success!
 
 | Metric | Details |
