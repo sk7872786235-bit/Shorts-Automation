@@ -1,256 +1,132 @@
-"""
-Automated YouTube Shorts Pipeline (Dynamic Clip Timing + Cookie Authentication)
-"""
-
-import json
-import os
-import subprocess
-import sys
-from typing import Dict, Optional
-
-import feedparser
+import os, sys, time, json, feedparser, subprocess
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from google import genai
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
 
-# Initialize Gemini Client
-gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+def get_transcript_with_retry(video_id, max_retries=6, wait_minutes=15):
+    """Waits for YouTube auto-captions to finish generating."""
+    for attempt in range(max_retries):
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript = transcript_list.find_transcript(['en'])
+            return transcript.fetch()
+        except (NoTranscriptFound, TranscriptsDisabled):
+            print(f"Captions not ready yet. Sleeping {wait_minutes} mins... (Attempt {attempt + 1}/{max_retries})")
+            time.sleep(wait_minutes * 60)
+            
+    print("Failed to get transcript after max retries. Exiting cleanly.")
+    sys.exit(0)
 
-
-# -------------------------------------------------------------------
-# Helper: Setup Cookies from GitHub Secret
-# -------------------------------------------------------------------
-def setup_cookies() -> Optional[str]:
-    cookies_content = os.environ.get("YT_COOKIES")
-    if not cookies_content or len(cookies_content.strip()) == 0:
-        print("CRITICAL WARNING: YT_COOKIES environment variable not found.")
-        print("YouTube downloads will likely fail due to bot detection.")
-        return None
-
-    cookie_file = "cookies.txt"
-    with open(cookie_file, "w", encoding="utf-8") as f:
-        f.write(cookies_content)
-    print("Successfully wrote cookies.txt from environment variable.")
-    return cookie_file
-
-
-# -------------------------------------------------------------------
-# 1. Fetch Latest Video Details from RSS Feed
-# -------------------------------------------------------------------
-def get_latest_video_info(channel_id: str) -> Optional[Dict[str, str]]:
-    rss_url = f"[https://www.youtube.com/feeds/videos.xml?channel_id=](https://www.youtube.com/feeds/videos.xml?channel_id=){channel_id}"
-    feed = feedparser.parse(rss_url)
-    if not feed.entries:
-        print("No videos found in feed.")
-        return None
-
-    latest_entry = feed.entries[0]
-    return {
-        "video_id": latest_entry.yt_videoid,
-        "title": latest_entry.title,
-        "description": latest_entry.get("summary", ""),
-    }
-
-
-# -------------------------------------------------------------------
-# 2. Use Gemini to Determine Clip Timestamps & Short Metadata
-# -------------------------------------------------------------------
-def get_dynamic_clip_info(
-    title: str, description: str
-) -> Optional[Dict[str, str]]:
-    prompt = f"""
-    You are an expert YouTube Shorts editor for a Kids Animation & Songs channel.
-    
-    Video Title: "{title}"
-    Video Description: "{description}"
-    
-    Tasks:
-    1. Determine the best starting timestamp (in HH:MM:SS format) for a 30 to 45 second Short clip. Skip intro title cards (usually start around 00:00:15 or 00:00:20).
-    2. Suggest a clip duration (in seconds, between 30 and 45).
-    3. Create a high-hook YouTube Short title with emojis and relevant hashtags (e.g. #Shorts #KidsSongs #Animation).
-    4. Write a brief engaging description for parents and toddlers.
-    
-    Return ONLY a valid JSON object with these exact keys:
-    "start_time", "duration", "short_title", "short_description"
-    """
-    try:
-        # Using Chat session to avoid the Automatic Function Calling (AFC) warning
-        chat = gemini_client.chats.create(model="gemini-3.6-flash")
-        response = chat.send_message(prompt)
-        
-        text_response = response.text.strip()
-        
-        # Clean up Markdown JSON formatting if present
-        if text_response.startswith("```json"):
-            text_response = text_response[7:]
-        # ---- THIS IS THE LINE THAT WAS BROKEN IN YOUR REPO ----
-        if text_response.endswith("```"):
-            text_response = text_response[:-3]
-
-        return json.loads(text_response.strip())
-    except Exception as e:
-        print(f"Error calling Gemini API: {e}")
-        return {
-            "start_time": "00:00:20",
-            "duration": "40",
-            "short_title": f"{title} #Shorts #KidsSongs",
-            "short_description": "Check out our latest animated kids song! Subscribe for more.",
-        }
-
-
-# -------------------------------------------------------------------
-# 3. Download, Cut & Crop Video to Vertical 9:16 Shorts Format
-# -------------------------------------------------------------------
-def download_and_cut_video(
-    video_id: str,
-    start_time: str,
-    duration: str,
-    output_file: str,
-    cookie_file: Optional[str] = None,
-) -> bool:
-    video_url = f"[https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=){video_id}"
-    print(
-        f"Fetching stream for {video_url} starting at {start_time} for {duration}s..."
-    )
-
-    cmd = [
-        "yt-dlp",
-        "--extractor-args",
-        "youtube:player_client=android,web",
-    ]
-
-    # Apply cookies if the file was successfully created from secrets
-    if cookie_file and os.path.exists(cookie_file):
-        cmd.extend(["--cookies", cookie_file])
-
-    cmd.extend(
-        ["-g", "-f", "b[ext=mp4]/best[ext=mp4]/best", video_url]
-    )
-
-    try:
-        stream_output = (
-            subprocess.check_output(cmd).decode("utf-8").strip().split("\n")
-        )
-        stream_url = stream_output[0]
-
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-y",
-            "-ss",
-            start_time,
-            "-i",
-            stream_url,
-            "-t",
-            duration,
-            "-vf",
-            "crop=ih*(9/16):ih",
-            "-c:v",
-            "libx264",
-            "-c:a",
-            "aac",
-            output_file,
-        ]
-        print("Processing clip with FFmpeg...")
-        subprocess.run(ffmpeg_cmd, check=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"Subprocess error (yt-dlp or ffmpeg failed): {e}")
-        return False
-    except Exception as e:
-        print(f"Unexpected error processing video clip: {e}")
-        return False
-
-
-# -------------------------------------------------------------------
-# 4. Upload Video to YouTube via OAuth2
-# -------------------------------------------------------------------
-def get_youtube_service():
-    client_id = os.environ.get("YT_CLIENT_ID")
-    client_secret = os.environ.get("YT_CLIENT_SECRET")
-    refresh_token = os.environ.get("YT_REFRESH_TOKEN")
-
-    creds = Credentials(
-        token=None,
-        refresh_token=refresh_token,
-        token_uri="[https://oauth2.googleapis.com/token](https://oauth2.googleapis.com/token)",
-        client_id=client_id,
-        client_secret=client_secret,
-    )
-    creds.refresh(Request())
-    return build("youtube", "v3", credentials=creds)
-
-
-def upload_short(video_path: str, title: str, description: str):
-    try:
-        youtube = get_youtube_service()
-        body = {
-            "snippet": {
-                "title": title,
-                "description": description,
-                "categoryId": "1",
-            },
-            "status": {
-                "privacyStatus": "public",
-                "selfDeclaredMadeForKids": True,
-            },
-        }
-        media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
-        request = youtube.videos().insert(
-            part="snippet,status", body=body, media_body=media
-        )
-        response = request.execute()
-        print(f"Successfully uploaded Short! Video ID: {response.get('id')}")
-    except Exception as e:
-        print(f"Error uploading video: {e}")
-
-
-# -------------------------------------------------------------------
-# Main Pipeline Execution
-# -------------------------------------------------------------------
 def main():
-    channel_id = os.environ.get("YT_CHANNEL_ID")
-    if not channel_id:
-        print("YT_CHANNEL_ID environment variable is missing.")
-        sys.exit(1)
+    # 1. Fetch Latest Video from RSS
+    channel_id = os.environ["YT_CHANNEL_ID"]
+    feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    feed = feedparser.parse(feed_url)
+    
+    if not feed.entries:
+        print("No videos found on channel.")
+        sys.exit(0)
 
-    # Setup cookies file if available
-    cookie_file = setup_cookies()
+    latest_video = feed.entries[0]
+    video_id = latest_video.yt_videoid
+    video_title = latest_video.title
 
-    print(f"Fetching latest video for channel: {channel_id}")
-    video_info = get_latest_video_info(channel_id)
-    if not video_info:
-        print("Could not retrieve latest video details.")
-        return
+    # 2. Check if we already processed this video
+    if not os.path.exists("processed.txt"):
+        open("processed.txt", "w").close()
 
-    video_id = video_info["video_id"]
-    print(
-        f"Processing video: '{video_info['title']}' (Video ID: {video_id})"
+    with open("processed.txt", "r") as f:
+        if video_id in f.read():
+            print(f"Video {video_id} already processed. Waiting for next upload.")
+            sys.exit(0)
+
+    print(f"New video detected: {video_title} ({video_id})")
+
+    # 3. Get Transcript
+    transcript_data = get_transcript_with_retry(video_id)
+    transcript_text = " ".join([f"[{t['start']:.1f}s] {t['text']}" for t in transcript_data])
+
+    # 4. Ask Gemini Flash for the best 30-50s viral segment
+    print("Asking Gemini to find the viral hook...")
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    
+    prompt = f"""
+    Analyze this video transcript. Find the single most engaging, high-retention 30 to 50 second segment.
+    Return ONLY a valid JSON object with the exact start and end time in seconds. No formatting, no markdown blocks.
+    Example output: {{"start": 12, "end": 45}}
+    
+    Transcript:
+    {transcript_text[:25000]}
+    """
+    
+    response = client.models.generate_content(
+        model="gemini-1.5-flash",
+        contents=prompt
     )
+    
+    clean_json = response.text.strip().replace("```json", "").replace("```", "")
+    timestamps = json.loads(clean_json)
+    
+    start = int(timestamps["start"])
+    duration = int(timestamps["end"]) - start
+    print(f"Gemini selected: Start {start}s, Duration {duration}s")
 
-    print("Asking Gemini for dynamic clip timing & Short metadata...")
-    clip_info = get_dynamic_clip_info(
-        video_info["title"], video_info["description"]
+    # 5. Handle Cookies and Download Segment
+    print("Downloading and cropping video...")
+    yt_url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    # Process cookies if provided to bypass YouTube bot detection
+    cookie_param = ""
+    yt_cookies = os.environ.get("YT_COOKIES", "")
+    if yt_cookies:
+        with open("cookies.txt", "w") as f:
+            f.write(yt_cookies)
+        cookie_param = '--cookies cookies.txt'
+
+    dl_cmd = f'yt-dlp {cookie_param} --download-sections "*{start}-{start+duration}" -f "bestvideo[ext=mp4]+bestaudio[m4a]/best" "{yt_url}" -o "clip.mp4"'
+    subprocess.run(dl_cmd, shell=True, check=True)
+
+    # Crop to 1080x1920 (Vertical)
+    crop_cmd = 'ffmpeg -i clip.mp4 -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -c:v libx264 -c:a aac output.mp4 -y'
+    subprocess.run(crop_cmd, shell=True, check=True)
+
+    # 6. Upload to YouTube Shorts
+    print("Uploading to YouTube Shorts...")
+    # Because you separated the secrets, you can build the credentials object directly!
+    creds = Credentials(
+        None,
+        refresh_token=os.environ["YT_REFRESH_TOKEN"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ["YT_CLIENT_ID"],
+        client_secret=os.environ["YT_CLIENT_SECRET"]
     )
+    youtube = build("youtube", "v3", credentials=creds)
+    
+    body = {
+        "snippet": {
+            "title": f"{video_title[:80]} #Shorts",
+            "description": "Automated cut from the main video #Shorts",
+            "categoryId": "22" # 22 = People & Blogs category
+        },
+        "status": {
+            "privacyStatus": "public",
+            "selfDeclaredMadeForKids": False
+        }
+    }
+    
+    youtube.videos().insert(
+        part="snippet,status",
+        body=body,
+        media_body=MediaFileUpload("output.mp4", mimetype="video/mp4")
+    ).execute()
 
-    output_filename = "short_output.mp4"
-    if download_and_cut_video(
-        video_id,
-        start_time=clip_info["start_time"],
-        duration=str(clip_info["duration"]),
-        output_file=output_filename,
-        cookie_file=cookie_file,
-    ):
-        print("Uploading Short to YouTube...")
-        upload_short(
-            output_filename,
-            title=clip_info["short_title"],
-            description=clip_info["short_description"],
-        )
-    else:
-        print("Pipeline halted: Failed to download and cut video.")
+    print("Upload complete!")
 
+    # 7. Record the video as processed
+    with open("processed.txt", "a") as f:
+        f.write(f"{video_id}\n")
 
 if __name__ == "__main__":
     main()
