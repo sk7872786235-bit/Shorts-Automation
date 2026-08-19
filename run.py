@@ -1,6 +1,5 @@
 import os, sys, json, feedparser, subprocess, requests, time
 from google import genai
-from google.genai import types
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
@@ -82,7 +81,7 @@ def main():
 
     print(f"Processing Kids Video: {video_title} ({video_id})", flush=True)
 
-    # 1. Download AUDIO (Saved as .mp4 so the Linux server natively recognizes the format)
+    # 1. Download AUDIO 
     print("\n--- FETCHING AUDIO ---", flush=True)
     download_via_invidious(video_id, "audio.mp4", is_audio=True)
 
@@ -93,6 +92,7 @@ def main():
     api_key = os.environ["GEMINI_API_KEY"].strip()
     client = genai.Client(api_key=api_key)
     
+    # Uploading with strict MIME type so the Linux server doesn't pass it as a raw binary blob
     audio_file = client.files.upload(
         file="audio.mp4", 
         config={'mime_type': 'audio/mp4'}
@@ -122,18 +122,11 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # THE FIX: Explicitly name the parameters (file_uri and mime_type) for the SDK
-    audio_part = types.Part.from_uri(
-        file_uri=audio_file.uri, 
-        mime_type="audio/mp4"
-    )
-    
+    # THE FIX: Pass the audio_file natively and use a simple dictionary for the config
     response = client.models.generate_content(
         model="gemini-3.6-flash",
-        contents=[audio_part, prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        )
+        contents=[audio_file, prompt],
+        config={"response_mime_type": "application/json"}
     )
     
     clean_json = response.text.strip().replace("```json", "").replace("```", "")
