@@ -82,9 +82,9 @@ def main():
 
     print(f"Processing Kids Video: {video_title} ({video_id})", flush=True)
 
-    # 1. Download AUDIO
+    # 1. Download AUDIO (Saved as .mp4 so the Linux server natively recognizes the format)
     print("\n--- FETCHING AUDIO ---", flush=True)
-    download_via_invidious(video_id, "audio.m4a", is_audio=True)
+    download_via_invidious(video_id, "audio.mp4", is_audio=True)
 
     # 2. Upload Audio to Gemini
     print("\n--- AI ANALYSIS ---", flush=True)
@@ -94,7 +94,7 @@ def main():
     client = genai.Client(api_key=api_key)
     
     audio_file = client.files.upload(
-        file="audio.m4a", 
+        file="audio.mp4", 
         config={'mime_type': 'audio/mp4'}
     )
     
@@ -122,15 +122,15 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # THE FIX: Explicitly wrap the file in Part.from_uri to bypass the 'invalid argument/AFC' SDK bug
-    audio_part = types.Part.from_uri(
-        file_uri=audio_file.uri,
-        mime_type="audio/mp4"
-    )
+    # THE FIX: Explicitly package the file using positional arguments and strictly enforce JSON output
+    audio_part = types.Part.from_uri(audio_file.uri, "audio/mp4")
     
     response = client.models.generate_content(
         model="gemini-3.6-flash",
-        contents=[audio_part, prompt]
+        contents=[audio_part, prompt],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json"
+        )
     )
     
     clean_json = response.text.strip().replace("```json", "").replace("```", "")
