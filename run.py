@@ -3,7 +3,7 @@
 YouTube Shorts Automation Engine (run.py)
 =========================================
 Features:
-1. Multi-Gateway Stream Downloader (bypasses GitHub Actions datacenter IP bot challenges).
+1. Multi-Tier Download Engine (pytubefix with native PoToken solver + Cobalt + Invidious + yt-dlp).
 2. Zero-Quota Cookie Upload Protocol (YT_COOKIES) with automatic fallback to OAuth API.
 3. Anti-duplication state engine (history.json) preventing repeated clips.
 4. Gemini AI viral moment detector (30-55s intervals with high-CTR titles).
@@ -241,45 +241,104 @@ def extract_video_id(url_or_id):
         return url_or_id.split("youtu.be/")[1].split("?")[0]
     return url_or_id
 
+def download_segment_via_pytubefix(video_url, start_sec, duration, output_path):
+    """Downloads segment using pytubefix which includes built-in PoToken & JS challenge solver."""
+    try:
+        log("Attempting stream download via pytubefix (Built-in PoToken Solver)...", "INFO")
+        from pytubefix import YouTube
+        yt = YouTube(video_url, 'WEB')
+        stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+        if not stream:
+            stream = yt.streams.filter(file_extension='mp4').first()
+        if stream and stream.url:
+            log("pytubefix extracted stream URL! Cutting segment via FFmpeg...", "SUCCESS")
+            ff_cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(start_sec),
+                "-i", stream.url,
+                "-t", str(duration),
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-c:a", "aac",
+                output_path
+            ]
+            subprocess.run(ff_cmd, capture_output=True, timeout=90)
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                return True
+    except Exception as e:
+        log(f"pytubefix notice: {e}", "WARN")
+    return False
+
 def download_segment_via_gateway(video_id, start_sec, duration, output_path):
     """Downloads segment directly via distributed gateway streams (immune to datacenter IP challenges)."""
+    try:
+        cobalt_payload = {
+            "url": f"https://www.youtube.com/watch?v={video_id}",
+            "videoQuality": "720",
+            "downloadMode": "auto"
+        }
+        cobalt_headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+        for cob_url in ["https://api.cobalt.tools/api/json", "https://co.wuk.sh/api/json", "https://cobalt.api.karyon.ch/api/json"]:
+            try:
+                c_resp = requests.post(cob_url, json=cobalt_payload, headers=cobalt_headers, timeout=6)
+                if c_resp.status_code == 200:
+                    c_data = c_resp.json()
+                    direct_url = c_data.get("url")
+                    if direct_url:
+                        log("Cobalt stream acquired! Cutting segment via FFmpeg...", "SUCCESS")
+                        ff_cmd = [
+                            "ffmpeg", "-y",
+                            "-ss", str(start_sec),
+                            "-i", direct_url,
+                            "-t", str(duration),
+                            "-c:v", "libx264",
+                            "-preset", "ultrafast",
+                            "-c:a", "aac",
+                            output_path
+                        ]
+                        subprocess.run(ff_cmd, capture_output=True, timeout=90)
+                        if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                            return True
+            except Exception:
+                pass
+    except Exception as e:
+        log(f"Cobalt attempt notice: {e}", "WARN")
+
     gateways = [
-        f"https://inv.tux.pizza/api/v1/videos/{video_id}",
-        f"https://invidious.asir.dev/api/v1/videos/{video_id}",
-        f"https://yt.artemislena.eu/api/v1/videos/{video_id}",
-        f"https://iv.ggtyler.dev/api/v1/videos/{video_id}",
-        f"https://invidious.nerdvpn.de/api/v1/videos/{video_id}",
         f"https://pipedapi.kavin.rocks/streams/{video_id}",
-        f"https://api.piped.privacy.com.de/streams/{video_id}"
+        f"https://api.piped.privacy.com.de/streams/{video_id}",
+        f"https://piped-api.garudalinux.org/streams/{video_id}",
+        f"https://inv.tux.pizza/api/v1/videos/{video_id}",
+        f"https://invidious.nerdvpn.de/api/v1/videos/{video_id}"
     ]
     
     for gw in gateways:
         try:
             gw_host = gw.split('/')[2]
-            log(f"Attempting stream extraction via gateway: {gw_host}...", "INFO")
-            resp = requests.get(gw, timeout=8, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            resp = requests.get(gw, timeout=6, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             if resp.status_code != 200:
                 continue
             data = resp.json()
             stream_url = None
             
-            # Check Invidious formatStreams
-            if "formatStreams" in data and isinstance(data["formatStreams"], list):
-                for stream in reversed(data["formatStreams"]):
-                    if stream.get("url") and ("mp4" in stream.get("container", "") or "720" in stream.get("qualityLabel", "") or "1080" in stream.get("qualityLabel", "")):
-                        stream_url = stream["url"]
-                        break
-                if not stream_url and data["formatStreams"]:
-                    stream_url = data["formatStreams"][-1].get("url")
-                    
-            # Check Piped videoStreams
-            elif "videoStreams" in data and isinstance(data["videoStreams"], list):
+            if "videoStreams" in data and isinstance(data["videoStreams"], list):
                 for stream in data["videoStreams"]:
                     if stream.get("url") and stream.get("videoOnly") is False:
                         stream_url = stream["url"]
                         break
                 if not stream_url and data["videoStreams"]:
                     stream_url = data["videoStreams"][0].get("url")
+
+            elif "formatStreams" in data and isinstance(data["formatStreams"], list):
+                for stream in reversed(data["formatStreams"]):
+                    if stream.get("url") and ("mp4" in stream.get("container", "") or "720" in stream.get("qualityLabel", "") or "1080" in stream.get("qualityLabel", "")):
+                        stream_url = stream["url"]
+                        break
+                if not stream_url and data["formatStreams"]:
+                    stream_url = data["formatStreams"][-1].get("url")
 
             if stream_url:
                 log(f"Direct media stream URL acquired from {gw_host}! Cutting segment via FFmpeg...", "SUCCESS")
@@ -296,7 +355,7 @@ def download_segment_via_gateway(video_id, start_sec, duration, output_path):
                 subprocess.run(ff_cmd, capture_output=True, timeout=90)
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
                     return True
-        except Exception as e:
+        except Exception:
             continue
     return False
 
@@ -316,15 +375,20 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
     video_id = extract_video_id(video_url)
     log(f"Downloading clip segment for '{video_id}' ({start_sec}s to {end_sec}s, duration: {duration}s)...", "FFMPEG")
 
-    # Strategy 1: Gateway Stream Extractor (100% immune to GitHub Actions datacenter IP blocks)
-    log("Strategy 1: Attempting high-speed gateway stream download...", "INFO")
-    if download_segment_via_gateway(video_id, start_sec, duration, raw_clip_path):
-        log("Strategy 1 SUCCESS: Clip segment downloaded via gateway stream!", "SUCCESS")
+    # Strategy 1: pytubefix with built-in JS challenge & PoToken generator
+    if download_segment_via_pytubefix(video_url, start_sec, duration, raw_clip_path):
+        log("Strategy 1 SUCCESS: Downloaded via pytubefix!", "SUCCESS")
 
-    # Strategy 2: yt-dlp with mobile iOS / Safari extractor spoofing
+    # Strategy 2: Gateway & Cobalt Stream Extractor (immune to datacenter IP blocks)
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Strategy 1 notice. Trying Strategy 2 (yt-dlp iOS/mweb mobile spoofing)...", "WARN")
-        cmd_strat2 = [
+        log("Strategy 1 notice. Trying Strategy 2 (Cobalt & Gateway streams)...", "INFO")
+        if download_segment_via_gateway(video_id, start_sec, duration, raw_clip_path):
+            log("Strategy 2 SUCCESS: Clip segment downloaded via gateway stream!", "SUCCESS")
+
+    # Strategy 3: yt-dlp with iOS user-agent and mobile extractor
+    if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
+        log("Strategy 2 notice. Trying Strategy 3 (yt-dlp iOS/mweb mobile spoofing)...", "WARN")
+        cmd_strat3 = [
             "yt-dlp",
             "--extractor-args", "youtube:player_client=mweb,web_creator,ios,android",
             "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
@@ -335,21 +399,7 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
             "-o", raw_clip_path,
             video_url
         ]
-        subprocess.run(cmd_strat2, capture_output=True, text=True)
-
-    # Strategy 3: yt-dlp with android_creator client
-    if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        log("Strategy 2 notice. Trying Strategy 3 (yt-dlp android_creator extractor)...", "WARN")
-        cmd_strat3 = [
-            "yt-dlp",
-            "--extractor-args", "youtube:player_client=android_creator,web_creator",
-            "-f", "18/22/best",
-            "--download-sections", f"*{start_sec}-{end_sec}",
-            "--no-check-certificates",
-            "-o", raw_clip_path,
-            video_url
-        ]
-        subprocess.run(cmd_strat3, capture_output=True)
+        subprocess.run(cmd_strat3, capture_output=True, text=True)
 
     # Strategy 4: Direct HTTP media URL extraction into FFmpeg
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
@@ -380,7 +430,7 @@ def process_short_video(video_url, start_sec, end_sec, overlay_text="", cookies_
             subprocess.run(ffmpeg_stream_cmd, capture_output=True)
 
     if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 10000:
-        raise FileNotFoundError("Failed to download raw video clip segment after all 4 extraction strategies.")
+        raise FileNotFoundError("Failed to download raw video clip segment after all extraction strategies.")
 
     log("Rendering vertical 9:16 (1080x1920) Short with blurred ambient background...", "FFMPEG")
     
