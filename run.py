@@ -1,5 +1,6 @@
 import os, sys, json, feedparser, subprocess, requests, time
 from google import genai
+from google.genai import types
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
@@ -81,9 +82,13 @@ def main():
 
     print(f"Processing Kids Video: {video_title} ({video_id})", flush=True)
 
-    # 1. Download AUDIO 
+    # 1. Download raw AUDIO
     print("\n--- FETCHING AUDIO ---", flush=True)
-    download_via_invidious(video_id, "audio.mp4", is_audio=True)
+    download_via_invidious(video_id, "audio_raw.m4a", is_audio=True)
+    
+    # THE FIX: Convert the audio to standard MP3 so Gemini natively supports it
+    print("Converting audio to MP3 for Gemini...", flush=True)
+    subprocess.run('ffmpeg -i audio_raw.m4a audio.mp3 -y', shell=True, check=True)
 
     # 2. Upload Audio to Gemini
     print("\n--- AI ANALYSIS ---", flush=True)
@@ -93,8 +98,8 @@ def main():
     client = genai.Client(api_key=api_key)
     
     audio_file = client.files.upload(
-        file="audio.mp4", 
-        config={'mime_type': 'audio/mp4'}
+        file="audio.mp3", 
+        config={'mime_type': 'audio/mp3'}
     )
     
     print("Waiting for Google's servers to process the audio track...", flush=True)
@@ -121,30 +126,21 @@ def main():
     
     print("Analyzing audio to find the best viral hook...", flush=True)
     
-    # THE FIX: Complete SDK Bypass using raw HTTP Requests
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key}"
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"fileData": {"mimeType": "audio/mp4", "fileUri": audio_file.uri}},
-                    {"text": prompt}
-                ]
-            }
-        ],
-        "generationConfig": {
-            "responseMimeType": "application/json"
-        }
-    }
+    # Packaged safely with explicit keyword arguments and the valid MP3 mime_type
+    audio_part = types.Part.from_uri(
+        file_uri=audio_file.uri, 
+        mime_type="audio/mp3"
+    )
     
-    resp = requests.post(url, json=payload)
+    response = client.models.generate_content(
+        model="gemini-3.6-flash",
+        contents=[audio_part, prompt],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json"
+        )
+    )
     
-    if resp.status_code != 200:
-        print(f"❌ API Request Failed: {resp.text}", flush=True)
-        sys.exit(1)
-        
-    data = resp.json()
-    clean_json = data['candidates'][0]['content']['parts'][0]['text'].strip().replace("```json", "").replace("```", "")
+    clean_json = response.text.strip().replace("```json", "").replace("```", "")
     timestamps = json.loads(clean_json)
     
     start = int(timestamps["start"])
