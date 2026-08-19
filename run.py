@@ -1,8 +1,48 @@
-import os, sys, json, feedparser, subprocess
+import os, sys, json, feedparser, subprocess, urllib.request, time
 from google import genai
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
+
+def download_via_proxy(video_url, output_filename, is_audio=False):
+    """Bypasses YouTube's IP block by using a free proxy API."""
+    print(f"Requesting download from proxy: {video_url}...", flush=True)
+    
+    # Using a public instance of Cobalt (a free, open-source media downloader)
+    api_url = "https://co.wuk.sh/api/json" 
+    
+    payload = json.dumps({
+        "url": video_url,
+        "isAudioOnly": is_audio,
+        "aFormat": "mp3" if is_audio else "best",
+        "vQuality": "1080",
+    }).encode('utf-8')
+    
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0"
+    }
+    
+    req = urllib.request.Request(api_url, data=payload, headers=headers)
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            
+            if data.get("status") == "error":
+                print(f"Proxy error: {data.get('text')}", flush=True)
+                sys.exit(1)
+                
+            download_url = data.get("url")
+            
+            print(f"Downloading file to {output_filename}...", flush=True)
+            urllib.request.urlretrieve(download_url, output_filename)
+            print("Download successful!", flush=True)
+            
+    except Exception as e:
+        print(f"Failed to download via proxy: {e}", flush=True)
+        sys.exit(1)
 
 def main():
     # 1. Fetch Latest Video from RSS
@@ -37,22 +77,14 @@ def main():
 
     print(f"Processing Kids Video: {video_title} ({video_id})", flush=True)
 
-    # 3. Mobile Spoofing + GitHub Actions IP Bypass
-    # - force-ipv4: Bypasses GitHub's blacklisted IPv6 ranges
-    # - rm-cache-dir: Clears poisoned cache from previous failures
-    # - player_client=ios: Pretends to be an iPhone
-    anti_bot_flags = '--rm-cache-dir --force-ipv4 --extractor-args "youtube:player_client=ios"'
-
-    # Download AUDIO ONLY for Gemini to listen to
-    print("Downloading audio track for AI analysis...", flush=True)
-    audio_cmd = f'yt-dlp {anti_bot_flags} -f "bestaudio[ext=m4a]" "{yt_url}" -o "audio.m4a"'
-    subprocess.run(audio_cmd, shell=True, check=True)
+    # 3. Download AUDIO ONLY using Proxy
+    download_via_proxy(yt_url, "audio.mp3", is_audio=True)
 
     # 4. Upload Audio to Gemini 1.5 Flash
     print("Uploading audio to Gemini for timestamp extraction...", flush=True)
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     
-    audio_file = client.files.upload(file="audio.m4a")
+    audio_file = client.files.upload(file="audio.mp3")
     
     prompt = """
     Listen to this audio track from a kids' YouTube video. 
@@ -61,7 +93,11 @@ def main():
     Example: {"start": 12, "end": 45}
     """
     
-    print("Analyzing audio...", flush=True)
+    print("Analyzing audio (this might take a few seconds)...", flush=True)
+    
+    # Add a small delay to ensure Google's servers process the uploaded file
+    time.sleep(10) 
+    
     response = client.models.generate_content(
         model="gemini-1.5-flash",
         contents=[audio_file, prompt]
@@ -74,13 +110,13 @@ def main():
     duration = int(timestamps["end"]) - start
     print(f"Gemini selected the catchiest part: Start {start}s, Duration {duration}s", flush=True)
 
-    # 5. Download ONLY that specific video segment & format to 9:16
-    print("Downloading that specific video segment...", flush=True)
-    dl_cmd = f'yt-dlp {anti_bot_flags} --download-sections "*{start}-{start+duration}" --force-keyframes-at-cuts -f "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" "{yt_url}" -o "clip.mp4"'
-    subprocess.run(dl_cmd, shell=True, check=True)
+    # 5. Download the FULL video using Proxy
+    print("Downloading full video for cropping...", flush=True)
+    download_via_proxy(yt_url, "full_video.mp4", is_audio=False)
 
-    print("Cropping to 9:16 vertical via FFmpeg...", flush=True)
-    crop_cmd = 'ffmpeg -i clip.mp4 -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -c:v libx264 -preset fast -crf 22 -c:a aac output.mp4 -y'
+    # Crop to 9:16 vertical using FFmpeg based on Gemini's timestamps
+    print(f"Cropping to 9:16 vertical (Start: {start}s, Duration: {duration}s)...", flush=True)
+    crop_cmd = f'ffmpeg -ss {start} -i full_video.mp4 -t {duration} -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -c:v libx264 -preset fast -crf 22 -c:a aac output.mp4 -y'
     subprocess.run(crop_cmd, shell=True, check=True)
 
     # 6. Upload to YouTube Shorts (Kids Compliant)
@@ -118,7 +154,7 @@ def main():
     with open("processed.txt", "a") as f:
         f.write(f"{video_id}\n")
 
-    # Cleanup temp audio file from Google's servers
+    # Cleanup temp files
     try:
         client.files.delete(name=audio_file.name)
     except:
