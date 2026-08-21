@@ -12,15 +12,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Install FFmpeg
+    - name: Install FFmpeg and Fonts
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg
-        
-    - name: Download Scalable Vector Fonts
-      run: |
-        wget -q https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSans-Bold.ttf -O DejaVu.ttf
-        wget -q https://raw.githubusercontent.com/googlefonts/noto-emoji/main/fonts/NotoEmoji-Regular.ttf -O NotoEmoji.ttf
+        sudo apt-get install -y ffmpeg fonts-dejavu
+        wget -q https://raw.githubusercontent.com/ChiefMikeK/ttf-symbola/master/Symbola.ttf -O Symbola.ttf
       
     - name: Set up Python
       uses: actions/setup-python@v5
