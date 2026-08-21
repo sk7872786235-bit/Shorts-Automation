@@ -118,16 +118,16 @@ def main():
     print("Editing video with FFmpeg...")
     final_video = "final_short.mp4"
     
-    # THE FIX: Pointing to the local, scalable vector fonts we just downloaded
-    font_standard = "DejaVu.ttf"
-    font_emoji = "NotoEmoji.ttf"
+    # THE FIX: Point standard text to native Linux font, emojis to the custom scalable vector font
+    font_standard = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    font_emoji = "Symbola.ttf"
     
     ffmpeg_video_filter = (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
         "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black[bg];"
         f"[bg]drawtext=textfile='hero.txt':fontfile='{font_standard}':fontcolor=white:fontsize=80:x=(w-text_w)/2:y=180[t1];"
         f"[t1]drawtext=textfile='sub.txt':fontfile='{font_standard}':fontcolor=white:fontsize=65:x=(w-text_w)/2:y=h-300[t2];"
-        f"[t2]drawtext=textfile='emojis.txt':fontfile='{font_emoji}':fontsize=80:x=(w-text_w)/2:y=h-200"
+        f"[t2]drawtext=textfile='emojis.txt':fontfile='{font_emoji}':fontcolor=white:fontsize=80:x=(w-text_w)/2:y=h-200"
     )
     
     subprocess.run([
