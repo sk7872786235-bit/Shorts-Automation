@@ -13,16 +13,13 @@ UPLOAD_FOLDER_ID = '1oAHvgUiNLV0uZHycYe_LV0iKKgiKh0SL'
 PROCESSED_FOLDER_ID = '14MwLbBU0cx9-acCoQxDKHGl1eQ7IvYpy'
 
 def get_drive_service():
-    """Authenticates with Google Drive using the Service Account JSON"""
     service_account_info = json.loads(os.environ['GDRIVE_SERVICE_ACCOUNT_JSON'])
     creds = Credentials.from_service_account_info(
-        service_account_info, 
-        scopes=['https://www.googleapis.com/auth/drive']
+        service_account_info, scopes=['https://www.googleapis.com/auth/drive']
     )
     return build('drive', 'v3', credentials=creds)
 
 def get_youtube_service():
-    """Authenticates with YouTube using your existing Refresh Token secrets"""
     token_data = {
         'token': None,
         'refresh_token': os.environ['YT_REFRESH_TOKEN'],
@@ -36,12 +33,10 @@ def get_youtube_service():
 def main():
     drive_service = get_drive_service()
     
-    # 1. Find the next video in the 'To Upload' folder
+    # 1. Find Video
     results = drive_service.files().list(
         q=f"'{UPLOAD_FOLDER_ID}' in parents and mimeType contains 'video/'",
-        spaces='drive',
-        fields='files(id, name)',
-        pageSize=1
+        spaces='drive', fields='files(id, name)', pageSize=1
     ).execute()
     
     items = results.get('files', [])
@@ -60,20 +55,28 @@ def main():
         done = False
         while done is False:
             status, done = downloader.next_chunk()
-            print(f"Download {int(status.progress() * 100)}%.")
             
-    # 2. Ask Gemini 3.7 Flash for the peak moment
-    print("Uploading to Gemini for analysis...")
+    # 2. Ask Gemini for Pro-Level Metadata
+    print("Uploading to Gemini for AI Production Analysis...")
     ai_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     gemini_file = ai_client.files.upload(file=local_filename)
     
     prompt = """
-    Analyze this video and identify the single most engaging 30-to-60 second segment to use as a YouTube Short.
+    Act as an expert YouTube Shorts producer for a kids entertainment channel named 'Bonza Kids'.
+    Analyze this video and identify the single most engaging 30-to-60 second segment.
+    Determine if the spoken language/context is primarily Hindi or English.
+    
     Return ONLY a valid JSON object with these exact keys:
     - "start_time": (integer, start timestamp in seconds)
     - "end_time": (integer, end timestamp in seconds)
-    - "title": (A viral, engaging title for the Short, max 60 characters)
-    - "description": (A brief description with 3 relevant hashtags)
+    - "thumbnail_time": (integer, timestamp of the best frame to use for the thumbnail)
+    - "hero_text": (Short, catchy text for the top of the video, max 25 chars)
+    - "emojis": (3 to 5 emojis related to the topic)
+    - "title": (A viral title for the YouTube upload)
+    - "thumbnail_text": (Super short text to burn onto the thumbnail image, max 4 words)
+    - "description": (A broad, detailed description with 5 relevant hashtags)
+    - "tags": (List of 8 string tags based on title and description)
+    - "language": (Return exact string "hi" for Hindi or "en" for English)
     """
     
     response = ai_client.models.generate_content(
@@ -81,72 +84,93 @@ def main():
         contents=[gemini_file, prompt]
     )
     
-    # Clean up the JSON response
+    # Parse JSON cleanly
     response_text = response.text.replace("```json", "").replace("```", "").strip()
     ai_data = json.loads(response_text)
     
-    start_sec = ai_data["start_time"]
-    end_sec = ai_data["end_time"]
-    title = ai_data["title"]
-    description = ai_data["description"]
+    # Save texts to files for FFmpeg to read (prevents character escaping errors)
+    with open("hero.txt", "w", encoding="utf-8") as f: f.write(ai_data["hero_text"])
+    with open("sub.txt", "w", encoding="utf-8") as f: f.write("Subscribe to Bonza Kids")
+    with open("emojis.txt", "w", encoding="utf-8") as f: f.write(ai_data["emojis"])
+    with open("thumb_text.txt", "w", encoding="utf-8") as f: f.write(ai_data["thumbnail_text"])
     
-    print(f"Gemini chose timestamps {start_sec}s to {end_sec}s")
-    
-    # 3. Use FFmpeg to cut and apply the blurred background (Option A)
+    # 3. Edit Video (Black Bars + Text overlays)
     print("Editing video with FFmpeg...")
     final_video = "final_short.mp4"
-    ffmpeg_filter = (
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
-        "boxblur=luma_radius=20:luma_power=1[bg];"
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2"
+    font_standard = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    font_emoji = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
+    
+    # Scales video to fit 1080 width, pads to 1920 height with black, then draws texts
+    ffmpeg_video_filter = (
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
+        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black[bg];"
+        f"[bg]drawtext=textfile='hero.txt':fontfile='{font_standard}':fontcolor=white:fontsize=80:x=(w-text_w)/2:y=180[t1];"
+        f"[t1]drawtext=textfile='sub.txt':fontfile='{font_standard}':fontcolor=white:fontsize=65:x=(w-text_w)/2:y=h-300[t2];"
+        f"[t2]drawtext=textfile='emojis.txt':fontfile='{font_emoji}':fontsize=80:x=(w-text_w)/2:y=h-200"
     )
     
     subprocess.run([
-        "ffmpeg", "-y", 
-        "-i", local_filename, 
-        "-ss", str(start_sec), 
-        "-to", str(end_sec), 
-        "-lavfi", ffmpeg_filter, 
-        "-c:a", "copy", 
-        final_video
+        "ffmpeg", "-y", "-i", local_filename, 
+        "-ss", str(ai_data["start_time"]), "-to", str(ai_data["end_time"]), 
+        "-lavfi", ffmpeg_video_filter, "-c:a", "copy", final_video
+    ], check=True)
+
+    # 4. Create Custom Thumbnail
+    print("Generating custom thumbnail...")
+    thumbnail_file = "thumbnail.jpg"
+    ffmpeg_thumb_filter = (
+        "[0:v]scale=1280:720:force_original_aspect_ratio=decrease,"
+        "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"drawtext=textfile='thumb_text.txt':fontfile='{font_standard}':fontcolor=yellow:fontsize=90:x=(w-text_w)/2:y=h/2"
+    )
+    
+    subprocess.run([
+        "ffmpeg", "-y", "-ss", str(ai_data["thumbnail_time"]), "-i", local_filename,
+        "-vframes", "1", "-vf", ffmpeg_thumb_filter, thumbnail_file
     ], check=True)
     
-    # 4. Upload to YouTube
-    print("Uploading to YouTube Shorts...")
+    # 5. Upload to YouTube API
+    print("Uploading to YouTube...")
     youtube_service = get_youtube_service()
     
     body = {
         'snippet': {
-            'title': title,
-            'description': description,
-            'tags': ['shorts', 'space', 'documentary'],
-            'categoryId': '28' # Science & Technology
+            'title': ai_data["title"],
+            'description': ai_data["description"],
+            'tags': ai_data["tags"],
+            'categoryId': '24', # Entertainment
+            'defaultLanguage': ai_data["language"],
+            'defaultAudioLanguage': ai_data["language"]
         },
         'status': {
             'privacyStatus': 'public',
-            'selfDeclaredMadeForKids': False
+            'selfDeclaredMadeForKids': True # Always Made for Kids
+            # Altered content (AI) is omitted, which defaults it to "No"
         }
     }
     
     media = MediaFileUpload(final_video, chunksize=-1, resumable=True)
-    request = youtube_service.videos().insert(
-        part=','.join(body.keys()),
-        body=body,
-        media_body=media
+    insert_req = youtube_service.videos().insert(
+        part=','.join(body.keys()), body=body, media_body=media
     )
-    response = request.execute()
-    print(f"Successfully uploaded! Video ID: {response['id']}")
+    video_response = insert_req.execute()
+    new_video_id = video_response['id']
+    print(f"Video uploaded successfully! ID: {new_video_id}")
     
-    # 5. Move the original video to 'Processed' in Google Drive
-    print("Moving original video to Processed folder...")
-    drive_service.files().update(
-        fileId=video_id,
-        addParents=PROCESSED_FOLDER_ID,
-        removeParents=UPLOAD_FOLDER_ID
+    # Upload custom thumbnail
+    print("Uploading thumbnail...")
+    youtube_service.thumbnails().set(
+        videoId=new_video_id,
+        media_body=MediaFileUpload(thumbnail_file)
     ).execute()
     
-    print("Automation complete.")
+    # 6. Move original to Processed
+    print("Moving original video to Processed folder...")
+    drive_service.files().update(
+        fileId=video_id, addParents=PROCESSED_FOLDER_ID, removeParents=UPLOAD_FOLDER_ID
+    ).execute()
+    
+    print("Automation perfectly executed.")
 
 if __name__ == '__main__':
     main()
