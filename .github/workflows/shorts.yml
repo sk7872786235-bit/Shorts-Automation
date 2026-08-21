@@ -1,99 +1,35 @@
-name: 🎬 YouTube Shorts AI Automation Bot
+name: YouTube Shorts Automation
 
 on:
   schedule:
-    # Runs every hour (configurable)
-    - cron: '0 * * * *'
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Dry Run Mode (Test without actually uploading to YouTube)'
-        required: false
-        type: boolean
-        default: false
-      force_video_id:
-        description: 'Specific YouTube Video ID to cut from (Leave blank for auto-selection)'
-        required: false
-        type: string
-        default: ''
-      privacy_status:
-        description: 'Upload Privacy'
-        required: false
-        type: choice
-        options:
-          - public
-          - unlisted
-          - private
-        default: public
-
-permissions:
-  contents: write
+    - cron: '0 2 * * *' # Runs every day at 2:00 AM UTC
+  workflow_dispatch: # Allows you to trigger it manually by clicking a button
 
 jobs:
-  publish_short:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
     steps:
-      - name: 📥 Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: 🐍 Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      # 🟢 Setup Node.js runtime (Allows pytubefix & yt-dlp to auto-generate PoToken / BotGuard tokens)
-      - name: 🟢 Set up Node.js for PoToken Generator
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      # 🎬 Instant FFmpeg (Pre-installed on GitHub Runners)
-      - name: 🎬 Set up FFmpeg (Instant)
-        uses: FedericoCarboni/setup-ffmpeg@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 📦 Install Python Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: 🚀 Run Shorts Automation Pipeline
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
-          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
-          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
-          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
-          YT_COOKIES: ${{ secrets.YT_COOKIES }}
-        run: |
-          ARGS=""
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
-          fi
-          if [ -n "${{ github.event.inputs.force_video_id }}" ]; then
-            ARGS="$ARGS --force-video-id ${{ github.event.inputs.force_video_id }}"
-          fi
-          if [ -n "${{ github.event.inputs.privacy_status }}" ]; then
-            ARGS="$ARGS --privacy ${{ github.event.inputs.privacy_status }}"
-          fi
-          
-          echo "Executing: python run.py $ARGS"
-          python run.py $ARGS
-
-      - name: 💾 Commit & Push History (Prevents Duplicate Content)
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add history.json
-          if git diff --staged --quiet; then
-            echo "No changes in history.json to commit."
-          else
-            git commit -m "🤖 Auto-update Shorts history (avoid duplicate segments) [skip ci]"
-            git push
-          fi
+    - uses: actions/checkout@v3
+    
+    # This action downloads the FFmpeg binary instantly instead of using apt-get
+    - name: Install FFmpeg
+      uses: FedericoCarboni/setup-ffmpeg@v3
+      with:
+        ffmpeg-version: release
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+      
+    - name: Run Shorts Automation
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+        YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+        YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+        YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+      run: python run.py
