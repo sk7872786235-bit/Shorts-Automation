@@ -7,7 +7,7 @@ from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google import genai
-from google.genai import types # Added to fix AFC warning
+from google.genai import types
 
 # Configuration
 UPLOAD_FOLDER_ID = '1oAHvgUiNLV0uZHycYe_LV0iKKgiKh0SL'
@@ -80,7 +80,6 @@ def main():
     - "language": (Return exact string "hi" for Hindi or "en" for English)
     """
     
-    # Added config to enforce JSON and remove the AFC warning
     response = ai_client.models.generate_content(
         model="gemini-3.7-flash",
         contents=[gemini_file, prompt],
@@ -115,7 +114,7 @@ def main():
     subprocess.run([
         "ffmpeg", "-y", "-i", local_filename, 
         "-ss", str(ai_data["start_time"]), "-to", str(ai_data["end_time"]), 
-        "-lavfi", ffm_video_filter, "-c:a", "copy", final_video
+        "-lavfi", ffmpeg_video_filter, "-c:a", "copy", final_video  # TYPO FIXED HERE
     ], check=True)
 
     # 4. Create Custom Thumbnail
