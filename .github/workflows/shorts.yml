@@ -9,15 +9,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     
-    # This squashes the Node 20 deprecation warning
     env:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
     steps:
-    # Upgraded to v4 to use newer Node versions
     - uses: actions/checkout@v4
     
-    # The new INSTANT FFmpeg install - no third-party actions required
     - name: Install FFmpeg (Instant Static Build)
       run: |
         wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
@@ -30,11 +27,10 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y fonts-dejavu fonts-noto-color-emoji
       
-    # Upgraded to v5 to use newer Node versions
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
+        python-version: '3.12' # Upgraded to 3.12 to fix the Google warning
         
     - name: Install dependencies
       run: pip install -r requirements.txt
