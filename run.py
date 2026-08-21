@@ -7,6 +7,7 @@ from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google import genai
+from google.genai import types # Added to fix AFC warning
 
 # Configuration
 UPLOAD_FOLDER_ID = '1oAHvgUiNLV0uZHycYe_LV0iKKgiKh0SL'
@@ -79,16 +80,19 @@ def main():
     - "language": (Return exact string "hi" for Hindi or "en" for English)
     """
     
+    # Added config to enforce JSON and remove the AFC warning
     response = ai_client.models.generate_content(
         model="gemini-3.7-flash",
-        contents=[gemini_file, prompt]
+        contents=[gemini_file, prompt],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+        )
     )
     
     # Parse JSON cleanly
-    response_text = response.text.replace("```json", "").replace("```", "").strip()
+    response_text = response.text.strip()
     ai_data = json.loads(response_text)
     
-    # Save texts to files for FFmpeg to read (prevents character escaping errors)
     with open("hero.txt", "w", encoding="utf-8") as f: f.write(ai_data["hero_text"])
     with open("sub.txt", "w", encoding="utf-8") as f: f.write("Subscribe to Bonza Kids")
     with open("emojis.txt", "w", encoding="utf-8") as f: f.write(ai_data["emojis"])
@@ -100,7 +104,6 @@ def main():
     font_standard = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     font_emoji = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
     
-    # Scales video to fit 1080 width, pads to 1920 height with black, then draws texts
     ffmpeg_video_filter = (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
         "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black[bg];"
@@ -112,7 +115,7 @@ def main():
     subprocess.run([
         "ffmpeg", "-y", "-i", local_filename, 
         "-ss", str(ai_data["start_time"]), "-to", str(ai_data["end_time"]), 
-        "-lavfi", ffmpeg_video_filter, "-c:a", "copy", final_video
+        "-lavfi", ffm_video_filter, "-c:a", "copy", final_video
     ], check=True)
 
     # 4. Create Custom Thumbnail
@@ -138,14 +141,13 @@ def main():
             'title': ai_data["title"],
             'description': ai_data["description"],
             'tags': ai_data["tags"],
-            'categoryId': '24', # Entertainment
+            'categoryId': '24', 
             'defaultLanguage': ai_data["language"],
             'defaultAudioLanguage': ai_data["language"]
         },
         'status': {
             'privacyStatus': 'public',
-            'selfDeclaredMadeForKids': True # Always Made for Kids
-            # Altered content (AI) is omitted, which defaults it to "No"
+            'selfDeclaredMadeForKids': True 
         }
     }
     
@@ -157,7 +159,6 @@ def main():
     new_video_id = video_response['id']
     print(f"Video uploaded successfully! ID: {new_video_id}")
     
-    # Upload custom thumbnail
     print("Uploading thumbnail...")
     youtube_service.thumbnails().set(
         videoId=new_video_id,
