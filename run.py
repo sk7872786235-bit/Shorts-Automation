@@ -2,7 +2,7 @@ import os
 import json
 import subprocess
 import io
-import time  # <-- NEW: Added for handling API rate limits
+import time
 from google.oauth2.service_account import Credentials
 from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
@@ -58,7 +58,7 @@ def main():
         while done is False:
             status, done = downloader.next_chunk()
             
-    # 2. Ask Gemini for Pro-Level Metadata (WITH RETRY LOGIC)
+    # 2. Ask Gemini for Pro-Level Metadata
     print("Uploading to Gemini for AI Production Analysis...")
     ai_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     gemini_file = ai_client.files.upload(file=local_filename)
@@ -81,7 +81,6 @@ def main():
     - "language": (Return exact string "hi" for Hindi or "en" for English)
     """
     
-    # NEW: Retry loop to handle 503 Server Overload errors from Gemini
     max_retries = 3
     response = None
     for attempt in range(max_retries):
@@ -93,7 +92,7 @@ def main():
                     response_mime_type="application/json",
                 )
             )
-            break  # If successful, break out of the loop
+            break
         except Exception as e:
             print(f"API Error on attempt {attempt + 1}: {e}")
             if attempt < max_retries - 1:
@@ -103,7 +102,6 @@ def main():
                 print("Max retries reached. Exiting script so GitHub can try again tomorrow.")
                 return
 
-    # If all retries failed, gracefully stop
     if not response:
         return
     
@@ -119,8 +117,10 @@ def main():
     # 3. Edit Video (Black Bars + Text overlays)
     print("Editing video with FFmpeg...")
     final_video = "final_short.mp4"
-    font_standard = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    font_emoji = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
+    
+    # THE FIX: Pointing to the local, scalable vector fonts we just downloaded
+    font_standard = "DejaVu.ttf"
+    font_emoji = "NotoEmoji.ttf"
     
     ffmpeg_video_filter = (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
