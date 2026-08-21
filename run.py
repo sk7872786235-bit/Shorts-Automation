@@ -32,6 +32,18 @@ def get_youtube_service():
     creds = UserCredentials.from_authorized_user_info(token_data)
     return build('youtube', 'v3', credentials=creds)
 
+# ---------------------------------------------------------
+# LEGENDARY CODER SHIELD: Bulletproof Type Handlers
+# ---------------------------------------------------------
+def ensure_string(val):
+    """Forces any AI output (list, int, etc.) into a clean string."""
+    return "".join(val) if isinstance(val, list) else str(val)
+
+def ensure_list(val):
+    """Forces any AI output (like a comma-separated string) into a valid list."""
+    if isinstance(val, list): return val
+    return [t.strip() for t in str(val).split(",")]
+
 def main():
     drive_service = get_drive_service()
     
@@ -73,7 +85,7 @@ def main():
     - "end_time": (integer, end timestamp in seconds)
     - "thumbnail_time": (integer, timestamp of the best frame to use for the thumbnail)
     - "hero_text": (Short, catchy text for the top of the video, max 25 chars)
-    - "emojis": (3 to 5 emojis related to the topic)
+    - "emojis": (A single string of 3 to 5 emojis related to the topic)
     - "title": (A viral title for the YouTube upload)
     - "thumbnail_text": (Super short text to burn onto the thumbnail image, max 4 words)
     - "description": (A broad, detailed description with 5 relevant hashtags)
@@ -105,20 +117,32 @@ def main():
     if not response:
         return
     
-    # Parse JSON cleanly
+    # Clean and parse JSON
     response_text = response.text.strip()
     ai_data = json.loads(response_text)
     
-    with open("hero.txt", "w", encoding="utf-8") as f: f.write(ai_data["hero_text"])
+    # ---------------------------------------------------------
+    # APPLYING THE SHIELD: Forcing all AI data into perfect types
+    # ---------------------------------------------------------
+    safe_hero = ensure_string(ai_data.get("hero_text", "NEW SHORT"))
+    safe_emojis = ensure_string(ai_data.get("emojis", "🚀🔥✨"))
+    safe_thumb = ensure_string(ai_data.get("thumbnail_text", "WOW!"))
+    
+    safe_title = ensure_string(ai_data.get("title", "Bonza Kids Special!"))
+    safe_desc = ensure_string(ai_data.get("description", "Enjoy this short! #bonzakids"))
+    safe_tags = ensure_list(ai_data.get("tags", ["shorts", "kids"]))
+    safe_lang = ensure_string(ai_data.get("language", "en")).lower()
+    
+    # Writing safely to files for FFmpeg
+    with open("hero.txt", "w", encoding="utf-8") as f: f.write(safe_hero)
     with open("sub.txt", "w", encoding="utf-8") as f: f.write("Subscribe to Bonza Kids")
-    with open("emojis.txt", "w", encoding="utf-8") as f: f.write(ai_data["emojis"])
-    with open("thumb_text.txt", "w", encoding="utf-8") as f: f.write(ai_data["thumbnail_text"])
+    with open("emojis.txt", "w", encoding="utf-8") as f: f.write(safe_emojis)
+    with open("thumb_text.txt", "w", encoding="utf-8") as f: f.write(safe_thumb)
     
     # 3. Edit Video (Black Bars + Text overlays)
     print("Editing video with FFmpeg...")
     final_video = "final_short.mp4"
     
-    # THE FIX: Point standard text to native Linux font, emojis to the custom scalable vector font
     font_standard = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     font_emoji = "Symbola.ttf"
     
@@ -156,12 +180,12 @@ def main():
     
     body = {
         'snippet': {
-            'title': ai_data["title"],
-            'description': ai_data["description"],
-            'tags': ai_data["tags"],
+            'title': safe_title,
+            'description': safe_desc,
+            'tags': safe_tags,
             'categoryId': '24', 
-            'defaultLanguage': ai_data["language"],
-            'defaultAudioLanguage': ai_data["language"]
+            'defaultLanguage': safe_lang,
+            'defaultAudioLanguage': safe_lang
         },
         'status': {
             'privacyStatus': 'public',
