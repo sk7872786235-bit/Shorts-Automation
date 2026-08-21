@@ -12,12 +12,15 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    # THE FIX: We install the native, fully-featured Ubuntu version of FFmpeg.
-    # This guarantees the 'drawtext' filter and font libraries are securely linked.
-    - name: Install Full FFmpeg and Fonts
+    - name: Install FFmpeg
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg fonts-dejavu fonts-noto-color-emoji
+        sudo apt-get install -y ffmpeg
+        
+    - name: Download Scalable Vector Fonts
+      run: |
+        wget -q https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans-Bold.ttf -O DejaVu.ttf
+        wget -q https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoEmoji-Regular.ttf -O NotoEmoji.ttf
       
     - name: Set up Python
       uses: actions/setup-python@v5
