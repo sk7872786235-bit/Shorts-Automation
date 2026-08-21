@@ -2,6 +2,7 @@ import os
 import json
 import subprocess
 import io
+import time  # <-- NEW: Added for handling API rate limits
 from google.oauth2.service_account import Credentials
 from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
@@ -57,7 +58,7 @@ def main():
         while done is False:
             status, done = downloader.next_chunk()
             
-    # 2. Ask Gemini for Pro-Level Metadata
+    # 2. Ask Gemini for Pro-Level Metadata (WITH RETRY LOGIC)
     print("Uploading to Gemini for AI Production Analysis...")
     ai_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     gemini_file = ai_client.files.upload(file=local_filename)
@@ -80,13 +81,31 @@ def main():
     - "language": (Return exact string "hi" for Hindi or "en" for English)
     """
     
-    response = ai_client.models.generate_content(
-        model="gemini-3.7-flash",
-        contents=[gemini_file, prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-        )
-    )
+    # NEW: Retry loop to handle 503 Server Overload errors from Gemini
+    max_retries = 3
+    response = None
+    for attempt in range(max_retries):
+        try:
+            response = ai_client.models.generate_content(
+                model="gemini-3.7-flash",
+                contents=[gemini_file, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                )
+            )
+            break  # If successful, break out of the loop
+        except Exception as e:
+            print(f"API Error on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                print("Gemini server is busy. Waiting 30 seconds before retrying...")
+                time.sleep(30)
+            else:
+                print("Max retries reached. Exiting script so GitHub can try again tomorrow.")
+                return
+
+    # If all retries failed, gracefully stop
+    if not response:
+        return
     
     # Parse JSON cleanly
     response_text = response.text.strip()
@@ -114,7 +133,7 @@ def main():
     subprocess.run([
         "ffmpeg", "-y", "-i", local_filename, 
         "-ss", str(ai_data["start_time"]), "-to", str(ai_data["end_time"]), 
-        "-lavfi", ffmpeg_video_filter, "-c:a", "copy", final_video  # TYPO FIXED HERE
+        "-lavfi", ffmpeg_video_filter, "-c:a", "copy", final_video
     ], check=True)
 
     # 4. Create Custom Thumbnail
