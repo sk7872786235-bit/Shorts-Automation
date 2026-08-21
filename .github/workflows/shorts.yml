@@ -19,8 +19,8 @@ jobs:
         
     - name: Download Scalable Vector Fonts
       run: |
-        wget -q https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans-Bold.ttf -O DejaVu.ttf
-        wget -q https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoEmoji-Regular.ttf -O NotoEmoji.ttf
+        wget -q https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSans-Bold.ttf -O DejaVu.ttf
+        wget -q https://raw.githubusercontent.com/googlefonts/noto-emoji/main/fonts/NotoEmoji-Regular.ttf -O NotoEmoji.ttf
       
     - name: Set up Python
       uses: actions/setup-python@v5
