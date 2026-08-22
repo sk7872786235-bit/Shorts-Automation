@@ -3,6 +3,8 @@ import json
 import subprocess
 import io
 import time
+import random
+from datetime import datetime, timedelta, timezone
 from google.oauth2.service_account import Credentials
 from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
@@ -10,9 +12,13 @@ from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google import genai
 from google.genai import types
 
-# Configuration
+# Google Drive Configuration
 UPLOAD_FOLDER_ID = '1oAHvgUiNLV0uZHycYe_LV0iKKgiKh0SL'
 PROCESSED_FOLDER_ID = '14MwLbBU0cx9-acCoQxDKHGl1eQ7IvYpy'
+
+# Allowed IST Publishing Slots (24-hour format: 8 AM, 9 AM, 12 PM, 1 PM, 4 PM, 5 PM, 6 PM, 7 PM, 8 PM, 9 PM)
+ALLOWED_IST_HOURS = [8, 9, 12, 13, 16, 17, 18, 19, 20, 21]
+IST_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 
 def get_drive_service():
     service_account_info = json.loads(os.environ['GDRIVE_SERVICE_ACCOUNT_JSON'])
@@ -38,6 +44,30 @@ def ensure_string(val):
 def ensure_list(val):
     if isinstance(val, list): return val
     return [t.strip() for t in str(val).split(",")]
+
+def get_video_duration(file_path):
+    """Uses ffprobe to get exact video duration in seconds."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        file_path
+    ]
+    output = subprocess.check_output(cmd).decode().strip()
+    return float(output)
+
+def generate_schedule_time(day_offset):
+    """Generates an RFC 3339 / ISO 8601 UTC timestamp for an IST slot across upcoming days."""
+    now_ist = datetime.now(IST_TIMEZONE)
+    target_date = now_ist + timedelta(days=day_offset)
+    
+    # Pick a random slot from the allowed hours
+    chosen_hour = random.choice(ALLOWED_IST_HOURS)
+    scheduled_ist = target_date.replace(hour=chosen_hour, minute=0, second=0, microsecond=0)
+    
+    # Convert IST to UTC for the YouTube API
+    scheduled_utc = scheduled_ist.astimezone(timezone.utc)
+    return scheduled_utc.strftime('%Y-%m-%dT%H:%M:%S.000Z'), scheduled_ist.strftime('%d %b %Y at %I:%00 %p IST')
 
 def main():
     drive_service = get_drive_service()
@@ -65,21 +95,27 @@ def main():
         while done is False:
             status, done = downloader.next_chunk()
             
-    # 2. Ask Gemini for 4 Pro-Level Segments
+    # 2. Determine Clip Count based on Video Duration
+    duration = get_video_duration(local_filename)
+    num_shorts = 2 if duration < 120 else 3
+    print(f"Video duration is {duration:.1f}s. Strategy: Extracting {num_shorts} clips of 30 seconds.")
+            
+    # 3. Ask Gemini to identify the best 30s clips
     print("Uploading to Gemini for Master Production Planning...")
     ai_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     gemini_file = ai_client.files.upload(file=local_filename)
     
-    prompt = """
+    prompt = f"""
     Act as an expert YouTube Shorts producer for a kids entertainment channel named 'Bonza Kids'.
-    Analyze this video and identify EXACTLY 4 completely unique, non-overlapping 30-to-60 second segments.
-    It is critical that the visual footage in each segment does not overlap with any other segment.
+    Analyze this video and identify EXACTLY {num_shorts} completely unique, non-overlapping segments.
+    Each segment MUST be approximately 30 seconds long (end_time - start_time = 30).
+    Select the absolute best peak moments from the video.
     Determine if the spoken language/context is primarily Hindi or English.
     
-    Return ONLY a valid JSON object containing a single key "shorts" mapped to an array of exactly 4 objects.
-    Each of the 4 objects MUST contain these exact keys:
+    Return ONLY a valid JSON object containing a single key "shorts" mapped to an array of exactly {num_shorts} objects.
+    Each object MUST contain these exact keys:
     - "start_time": (integer, start timestamp in seconds)
-    - "end_time": (integer, end timestamp in seconds)
+    - "end_time": (integer, end timestamp in seconds, exactly 30s after start_time)
     - "thumbnail_time": (integer, timestamp of the best frame to use for the thumbnail, must be within the start/end time)
     - "hero_text": (Short, catchy text for the top of the video, max 25 chars)
     - "title": (A viral title for the YouTube upload)
@@ -92,7 +128,6 @@ def main():
     response = None
     for attempt in range(max_retries):
         try:
-            # UPGRADED: Using the generous Gemini 3.5 Flash model (1,500 requests per day)
             response = ai_client.models.generate_content(
                 model="gemini-3.5-flash",
                 contents=[gemini_file, prompt],
@@ -104,17 +139,14 @@ def main():
         except Exception as e:
             error_msg = str(e)
             print(f"API Error on attempt {attempt + 1}: {error_msg}")
-            
             if "429" in error_msg or "Quota exceeded" in error_msg:
-                print("\n🚨 URGENT: Gemini Free Tier API Limit Reached.")
-                print("🚨 The script will exit now. Please wait 24 hours for your quota to reset, or upgrade your Google Cloud billing.")
+                print("\n🚨 URGENT: Gemini Free Tier Limit Reached. Exiting.")
                 return
-                
             if attempt < max_retries - 1:
                 print("Gemini server is busy. Waiting 30 seconds before retrying...")
                 time.sleep(30)
             else:
-                print("Max retries reached. Exiting script so GitHub can try again tomorrow.")
+                print("Max retries reached. Exiting.")
                 return
 
     if not response:
@@ -128,12 +160,18 @@ def main():
         print("AI did not return any shorts. Exiting.")
         return
         
-    print(f"\nGemini successfully planned {len(shorts_list)} unique shorts. Processing sequentially...")
+    print(f"\nGemini successfully planned {len(shorts_list)} clips. Processing and scheduling across separate days...")
     youtube_service = get_youtube_service()
 
-    # 3. Process each Short sequentially
+    # 4. Process each Short sequentially
+    font_standard = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
     for idx, short in enumerate(shorts_list):
+        day_offset = idx + 1  # Short 1 -> Tomorrow, Short 2 -> Day after tomorrow, Short 3 -> 3 days out
+        publish_at_utc, publish_at_ist_label = generate_schedule_time(day_offset)
+        
         print(f"\n--- Processing Short {idx + 1} of {len(shorts_list)} ---")
+        print(f"Target Schedule: {publish_at_ist_label} (UTC: {publish_at_utc})")
         
         safe_hero = ensure_string(short.get("hero_text", "NEW SHORT"))
         safe_title = ensure_string(short.get("title", f"Bonza Kids Special Part {idx+1}!"))
@@ -147,9 +185,7 @@ def main():
         final_video = f"final_short_{idx}.mp4"
         thumbnail_file = f"thumbnail_{idx}.jpg"
         
-        print(f"Cutting Segment {idx + 1}: {short.get('start_time')}s to {short.get('end_time')}s...")
-        font_standard = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        
+        print(f"Cutting clip: {short.get('start_time')}s to {short.get('end_time')}s...")
         ffmpeg_video_filter = (
             "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
             "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black[bg];"
@@ -163,7 +199,7 @@ def main():
             "-lavfi", ffmpeg_video_filter, "-c:a", "copy", final_video
         ], check=True)
 
-        print(f"Generating custom thumbnail {idx + 1} (No text, raw 9:16)...")
+        print(f"Generating clean 9:16 thumbnail frame...")
         ffmpeg_thumb_filter = (
             "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
             "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black"
@@ -174,7 +210,7 @@ def main():
             "-vframes", "1", "-vf", ffmpeg_thumb_filter, thumbnail_file
         ], check=True)
         
-        print(f"Uploading Short {idx + 1} to YouTube...")
+        print(f"Uploading and scheduling Short {idx + 1}...")
         body = {
             'snippet': {
                 'title': safe_title,
@@ -185,11 +221,11 @@ def main():
                 'defaultAudioLanguage': safe_lang
             },
             'status': {
-                'privacyStatus': 'public',
+                'privacyStatus': 'private', # Required to schedule a video
+                'publishAt': publish_at_utc,
                 'selfDeclaredMadeForKids': True,
-                # Forcing YouTube's "AI Use" toggle to NO
                 'selfDeclaredAlteredContent': False,
-                'selfDeclaredSyntheticMedia': False 
+                'selfDeclaredSyntheticMedia': False
             }
         }
         
@@ -199,21 +235,21 @@ def main():
         )
         video_response = insert_req.execute()
         new_video_id = video_response['id']
-        print(f"Short {idx + 1} uploaded successfully! ID: {new_video_id}")
+        print(f"Short {idx + 1} scheduled successfully! ID: {new_video_id}")
         
-        print(f"Uploading thumbnail for Short {idx + 1}...")
+        print(f"Uploading custom thumbnail for Short {idx + 1}...")
         youtube_service.thumbnails().set(
             videoId=new_video_id,
             media_body=MediaFileUpload(thumbnail_file)
         ).execute()
 
-    # 4. Move original video to Processed ONLY after all 4 shorts are successfully live
-    print("\nAll 4 Shorts generated and uploaded! Moving original video to Processed folder...")
+    # 5. Move original video to Processed folder
+    print("\nAll Shorts rendered, uploaded, and scheduled! Moving source video to Processed folder...")
     drive_service.files().update(
         fileId=video_id, addParents=PROCESSED_FOLDER_ID, removeParents=UPLOAD_FOLDER_ID
     ).execute()
     
-    print("Production Studio Automation Perfectly Executed.")
+    print("Multi-Day Staggered Scheduling Completed Successfully.")
 
 if __name__ == '__main__':
     main()
