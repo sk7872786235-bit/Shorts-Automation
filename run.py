@@ -92,8 +92,9 @@ def main():
     response = None
     for attempt in range(max_retries):
         try:
+            # UPGRADED: Using the generous Gemini 3.5 Flash model (1,500 requests per day)
             response = ai_client.models.generate_content(
-                model="gemini-3.7-flash",
+                model="gemini-3.5-flash",
                 contents=[gemini_file, prompt],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -101,7 +102,14 @@ def main():
             )
             break
         except Exception as e:
-            print(f"API Error on attempt {attempt + 1}: {e}")
+            error_msg = str(e)
+            print(f"API Error on attempt {attempt + 1}: {error_msg}")
+            
+            if "429" in error_msg or "Quota exceeded" in error_msg:
+                print("\n🚨 URGENT: Gemini Free Tier API Limit Reached.")
+                print("🚨 The script will exit now. Please wait 24 hours for your quota to reset, or upgrade your Google Cloud billing.")
+                return
+                
             if attempt < max_retries - 1:
                 print("Gemini server is busy. Waiting 30 seconds before retrying...")
                 time.sleep(30)
@@ -179,7 +187,9 @@ def main():
             'status': {
                 'privacyStatus': 'public',
                 'selfDeclaredMadeForKids': True,
-                'containsSyntheticMedia': False # Explicitly declaring NO Altered Content
+                # Forcing YouTube's "AI Use" toggle to NO
+                'selfDeclaredAlteredContent': False,
+                'selfDeclaredSyntheticMedia': False 
             }
         }
         
