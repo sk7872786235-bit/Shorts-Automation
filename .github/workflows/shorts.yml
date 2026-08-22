@@ -2,8 +2,9 @@ name: YouTube Shorts Automation
 
 on:
   schedule:
-    - cron: '0 2 * * *'
-  workflow_dispatch:
+    # Runs 3 times every day: 5:30 AM, 1:30 PM, and 9:30 PM IST
+    - cron: '0 0,8,16 * * *'
+  workflow_dispatch: # Allows manual trigger anytime from the Actions tab
 
 jobs:
   build:
@@ -16,7 +17,6 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y ffmpeg fonts-dejavu
-        wget -q https://raw.githubusercontent.com/ChiefMikeK/ttf-symbola/master/Symbola.ttf -O Symbola.ttf
       
     - name: Set up Python
       uses: actions/setup-python@v5
